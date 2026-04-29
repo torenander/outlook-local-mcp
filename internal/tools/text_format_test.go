@@ -683,24 +683,24 @@ func TestFormatFolderTreeText_Flat(t *testing.T) {
 func TestFormatFolderTreeText_Nested(t *testing.T) {
 	tree := []map[string]any{
 		{
-			"displayName":    "Inbox",
+			"displayName":     "Inbox",
 			"unreadItemCount": int32(5),
 			"totalItemCount":  int32(50),
 			"children": []map[string]any{
 				{
-					"displayName":    "Projects",
+					"displayName":     "Projects",
 					"unreadItemCount": int32(2),
 					"totalItemCount":  int32(15),
 					"children": []map[string]any{
 						{
-							"displayName":    "Swedfund",
+							"displayName":     "Swedfund",
 							"unreadItemCount": int32(0),
 							"totalItemCount":  int32(8),
 						},
 					},
 				},
 				{
-					"displayName":    "Archive",
+					"displayName":     "Archive",
 					"unreadItemCount": int32(0),
 					"totalItemCount":  int32(200),
 				},

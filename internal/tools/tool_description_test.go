@@ -223,10 +223,44 @@ func TestTopLevelDescription_Mail_ManageEnabled(t *testing.T) {
 		"create_forward_draft",
 		"update_draft",
 		"delete_draft",
+		"list_child_folders",
+		"list_folder_tree",
+		"create_folder",
+		"delete_folder",
+		"move_message",
+		"move_messages",
 	}
 	for _, verb := range draftVerbs {
 		if !strings.Contains(desc, verb) {
 			t.Errorf("mail description (MailManageEnabled=true) missing draft verb %q\n  got: %s", verb, desc)
+		}
+	}
+}
+
+// TestTopLevelDescription_Mail_ManageDisabled verifies that MailManageEnabled-
+// gated verbs do NOT appear when MailManageEnabled=false (CR-0066 AC-9).
+func TestTopLevelDescription_Mail_ManageDisabled(t *testing.T) {
+	s := buildDescriptionTestServer(t, config.Config{
+		AuthRecordPath: "/tmp/test",
+		CacheName:      "test",
+		AuthMethod:     "browser",
+		MailEnabled:    true,
+	})
+	desc := getToolDescription(t, s, "mail")
+
+	manageVerbs := []string{
+		"create_draft",
+		"delete_draft",
+		"list_child_folders",
+		"list_folder_tree",
+		"create_folder",
+		"delete_folder",
+		"move_message",
+		"move_messages",
+	}
+	for _, verb := range manageVerbs {
+		if strings.Contains(desc, verb) {
+			t.Errorf("mail description (MailManageEnabled=false) should not contain verb %q\n  got: %s", verb, desc)
 		}
 	}
 }

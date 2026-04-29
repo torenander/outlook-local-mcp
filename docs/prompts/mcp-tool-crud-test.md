@@ -599,6 +599,69 @@ Call `{tool: "mail", args: {operation: "get_message", id: "<message ID>", output
 - **Verify:** If the attachment is within the configured size limit, content is returned (base64); otherwise an explanatory message is returned.
 - **Fail:** If the attachment cannot be retrieved for a valid ID.
 
+### Step 37 -- Create top-level folder (skip if mail management disabled)
+
+Call `{tool: "mail", args: {operation: "create_folder", display_name: "MCP-Test-Folder"}}`.
+
+- **Verify:** Response is plain text containing the new folder ID and display name "MCP-Test-Folder".
+- **Record** the returned folder ID as **test folder ID**.
+- **Fail:** If the folder was not created or no ID is returned.
+
+### Step 38 -- Create nested child folder
+
+Call `{tool: "mail", args: {operation: "create_folder", display_name: "MCP-Test-Subfolder", parent_folder_id: "<test folder ID>"}}`.
+
+- **Verify:** Response is plain text containing the new child folder ID, display name, and parent folder ID.
+- **Record** the returned folder ID as **test subfolder ID**.
+- **Fail:** If the folder was not created or the parent reference is missing.
+
+### Step 39 -- List child folders
+
+Call `{tool: "mail", args: {operation: "list_child_folders", folder_id: "<test folder ID>"}}`.
+
+- **Verify:** Response is plain text listing at least one child folder ("MCP-Test-Subfolder").
+- **Fail:** If the subfolder is not listed.
+
+### Step 40 -- List folder tree
+
+Call `{tool: "mail", args: {operation: "list_folder_tree", max_depth: 2}}`.
+
+- **Verify:** Response is plain text showing an indented tree structure.
+- **Verify:** "MCP-Test-Folder" appears at the top level and "MCP-Test-Subfolder" appears indented beneath it.
+- **Fail:** If the tree structure is missing or the test folders are not visible.
+
+### Step 41 -- Move message to test folder
+
+Using `{tool: "mail", args: {operation: "list_messages", max_results: 1}}`, pick a message and record its ID as **move test message ID**. If no messages exist, skip Steps 41-42.
+
+Call `{tool: "mail", args: {operation: "move_message", message_id: "<move test message ID>", destination_folder_id: "<test folder ID>"}}`.
+
+- **Verify:** Response is plain text containing the original message ID, a new message ID, and the destination folder ID.
+- **Record** the new message ID as **moved message ID**.
+- **Fail:** If the move fails or no new ID is returned.
+
+### Step 42 -- Batch move messages
+
+Call `{tool: "mail", args: {operation: "move_messages", message_ids: "<moved message ID>", destination_folder_id: "Inbox"}}`.
+
+- **Verify:** Response reports "Moved 1 of 1 message(s)" with per-message OK status.
+- **Fail:** If the batch move reports failure.
+
+### Step 43 -- Delete subfolder
+
+Call `{tool: "mail", args: {operation: "delete_folder", folder_id: "<test subfolder ID>"}}`.
+
+- **Verify:** Response is plain text confirming the folder was deleted.
+- **Fail:** If the deletion fails.
+
+### Step 44 -- Delete top-level test folder
+
+Call `{tool: "mail", args: {operation: "delete_folder", folder_id: "<test folder ID>"}}`.
+
+- **Verify:** Response is plain text confirming the folder was deleted.
+- **Verify:** A subsequent `{tool: "mail", args: {operation: "list_child_folders", folder_id: "<test folder ID>"}}` returns an error (folder no longer exists).
+- **Fail:** If the folder still exists after deletion.
+
 ## Reporting
 
 After all steps, print a summary table. Every row **MUST** include a short `Comment` (under ~120 characters) explaining the result — for PASS rows, a brief confirmation of what was verified; for FAIL rows, the failure cause (tool name, error, mismatch); for SKIP rows, the reason (e.g., "single-account mode"). Do not leave the `Comment` column blank.
@@ -664,6 +727,14 @@ After all steps, print a summary table. Every row **MUST** include a short `Comm
 | 34   | Delete drafts                     | PASS/FAIL/SKIP | e.g., "both drafts deleted, 404 on re-fetch"             |
 | 35   | Get conversation                  | PASS/FAIL/SKIP | e.g., "thread returned in chronological order"           |
 | 36   | Get attachment                    | PASS/FAIL/SKIP | e.g., "metadata + base64 under size limit"               |
+| 37   | Create top-level folder           | PASS/FAIL/SKIP | e.g., "MCP-Test-Folder created with ID"                  |
+| 38   | Create nested child folder        | PASS/FAIL/SKIP | e.g., "MCP-Test-Subfolder created under parent"          |
+| 39   | List child folders                | PASS/FAIL/SKIP | e.g., "subfolder listed in children"                     |
+| 40   | List folder tree                  | PASS/FAIL/SKIP | e.g., "indented tree with test folders"                  |
+| 41   | Move message to folder            | PASS/FAIL/SKIP | e.g., "message moved, new ID returned"                   |
+| 42   | Batch move messages               | PASS/FAIL/SKIP | e.g., "1 of 1 moved successfully"                        |
+| 43   | Delete subfolder                  | PASS/FAIL/SKIP | e.g., "subfolder deleted"                                |
+| 44   | Delete top-level test folder      | PASS/FAIL/SKIP | e.g., "folder deleted, 404 on re-fetch"                  |
 ```
 
 Then print the **environment** section using all values recorded in Steps 0c and 1:

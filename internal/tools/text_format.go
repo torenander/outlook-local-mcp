@@ -607,6 +607,64 @@ func FormatMailFoldersText(folders []map[string]any) string {
 	return b.String()
 }
 
+// FormatFolderTreeText formats a nested slice of serialized folder maps into
+// a tree-structured plain-text listing with indentation showing the hierarchy.
+// Each node is expected to contain "displayName", "unreadItemCount",
+// "totalItemCount", and optionally "children" (a nested []map[string]any).
+//
+// Parameters:
+//   - tree: slice of folder maps at the root level, each potentially containing
+//     a "children" key with nested child folder maps.
+//
+// Returns a formatted plain-text string showing the folder hierarchy with
+// 2-space indentation per level and a total count. Returns "No folders found."
+// when the slice is nil or empty.
+//
+// Side effects: none.
+func FormatFolderTreeText(tree []map[string]any) string {
+	if len(tree) == 0 {
+		return "No folders found."
+	}
+
+	var b strings.Builder
+	total := formatFolderTreeLevel(&b, tree, 0)
+
+	fmt.Fprintf(&b, "\n%d folder(s) total.", total)
+
+	return b.String()
+}
+
+// formatFolderTreeLevel recursively writes folder entries at a given
+// indentation depth, returning the total count of folders written.
+//
+// Parameters:
+//   - b: the string builder to write to.
+//   - folders: the folders at the current level.
+//   - depth: the current indentation depth (0 = root, each level adds 2 spaces).
+//
+// Returns the total number of folders written at this level and below.
+//
+// Side effects: writes to b.
+func formatFolderTreeLevel(b *strings.Builder, folders []map[string]any, depth int) int {
+	indent := strings.Repeat("  ", depth)
+	count := 0
+	for _, f := range folders {
+		name, _ := f["displayName"].(string)
+		if name == "" {
+			name = "(Unnamed)"
+		}
+		unread := toInt(f["unreadItemCount"])
+		total := toInt(f["totalItemCount"])
+		fmt.Fprintf(b, "%s%s (%d unread, %d total)\n", indent, name, unread, total)
+		count++
+
+		if children, ok := f["children"].([]map[string]any); ok && len(children) > 0 {
+			count += formatFolderTreeLevel(b, children, depth+1)
+		}
+	}
+	return count
+}
+
 // toInt converts a numeric value from a map[string]any to int. Handles int32
 // (from direct serialization) and float64 (from JSON round-trip).
 //

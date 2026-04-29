@@ -642,3 +642,101 @@ func TestFormatAccountLine_EmptyLabel(t *testing.T) {
 		t.Errorf("FormatAccountLine with empty label = %q, want empty string", result)
 	}
 }
+
+// TestFormatFolderTreeText_Empty verifies that an empty tree returns the
+// "No folders found." message.
+func TestFormatFolderTreeText_Empty(t *testing.T) {
+	result := FormatFolderTreeText(nil)
+	if result != "No folders found." {
+		t.Errorf("FormatFolderTreeText(nil) = %q, want %q", result, "No folders found.")
+	}
+
+	result = FormatFolderTreeText([]map[string]any{})
+	if result != "No folders found." {
+		t.Errorf("FormatFolderTreeText([]) = %q, want %q", result, "No folders found.")
+	}
+}
+
+// TestFormatFolderTreeText_Flat verifies that a flat (no children) tree
+// renders correctly.
+func TestFormatFolderTreeText_Flat(t *testing.T) {
+	tree := []map[string]any{
+		{"displayName": "Inbox", "unreadItemCount": int32(3), "totalItemCount": int32(42)},
+		{"displayName": "Sent Items", "unreadItemCount": int32(0), "totalItemCount": int32(100)},
+	}
+
+	result := FormatFolderTreeText(tree)
+
+	if !strings.Contains(result, "Inbox (3 unread, 42 total)") {
+		t.Errorf("expected Inbox line, got: %q", result)
+	}
+	if !strings.Contains(result, "Sent Items (0 unread, 100 total)") {
+		t.Errorf("expected Sent Items line, got: %q", result)
+	}
+	if !strings.Contains(result, "2 folder(s) total.") {
+		t.Errorf("expected total count, got: %q", result)
+	}
+}
+
+// TestFormatFolderTreeText_Nested verifies that a nested tree renders with
+// correct indentation and total count.
+func TestFormatFolderTreeText_Nested(t *testing.T) {
+	tree := []map[string]any{
+		{
+			"displayName":    "Inbox",
+			"unreadItemCount": int32(5),
+			"totalItemCount":  int32(50),
+			"children": []map[string]any{
+				{
+					"displayName":    "Projects",
+					"unreadItemCount": int32(2),
+					"totalItemCount":  int32(15),
+					"children": []map[string]any{
+						{
+							"displayName":    "Swedfund",
+							"unreadItemCount": int32(0),
+							"totalItemCount":  int32(8),
+						},
+					},
+				},
+				{
+					"displayName":    "Archive",
+					"unreadItemCount": int32(0),
+					"totalItemCount":  int32(200),
+				},
+			},
+		},
+	}
+
+	result := FormatFolderTreeText(tree)
+
+	if !strings.Contains(result, "Inbox (5 unread, 50 total)") {
+		t.Errorf("expected root Inbox line, got: %q", result)
+	}
+	if !strings.Contains(result, "  Projects (2 unread, 15 total)") {
+		t.Errorf("expected indented Projects line, got: %q", result)
+	}
+	if !strings.Contains(result, "    Swedfund (0 unread, 8 total)") {
+		t.Errorf("expected double-indented Swedfund line, got: %q", result)
+	}
+	if !strings.Contains(result, "  Archive (0 unread, 200 total)") {
+		t.Errorf("expected indented Archive line, got: %q", result)
+	}
+	if !strings.Contains(result, "4 folder(s) total.") {
+		t.Errorf("expected 4 folder total count, got: %q", result)
+	}
+}
+
+// TestFormatFolderTreeText_UnnamedFolder verifies that folders with empty
+// display names fall back to "(Unnamed)".
+func TestFormatFolderTreeText_UnnamedFolder(t *testing.T) {
+	tree := []map[string]any{
+		{"displayName": "", "unreadItemCount": int32(0), "totalItemCount": int32(0)},
+	}
+
+	result := FormatFolderTreeText(tree)
+
+	if !strings.Contains(result, "(Unnamed)") {
+		t.Errorf("expected (Unnamed) fallback, got: %q", result)
+	}
+}

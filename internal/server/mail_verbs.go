@@ -134,6 +134,12 @@ func buildMailVerbs(c mailVerbsConfig) ([]tools.Verb, *tools.VerbRegistry) {
 			buildCreateForwardDraftVerb(c, rc, wrapWrite),
 			buildUpdateDraftVerb(c, rc, wrapWrite),
 			buildDeleteDraftVerb(c, rc, wrapWrite),
+			// Inbox rule management verbs (CR-0066).
+			buildListRulesVerb(c, rc, wrap),
+			buildGetRuleVerb(c, rc, wrap),
+			buildCreateRuleVerb(c, rc, wrapWrite),
+			buildUpdateRuleVerb(c, rc, wrapWrite),
+			buildDeleteRuleVerb(c, rc, wrapWrite),
 		)
 	}
 
@@ -593,6 +599,208 @@ func buildDeleteDraftVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fun
 			mcp.WithString("message_id",
 				mcp.Required(),
 				mcp.Description("The unique identifier of the draft message to delete."),
+			),
+			mcp.WithString("account",
+				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
+			),
+		},
+	}
+}
+
+// buildListRulesVerb constructs the list_rules Verb (MailManageEnabled-gated).
+func buildListRulesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
+	return tools.Verb{
+		Name:        "list_rules",
+		Summary:     "list all inbox message rules with conditions and actions summary",
+		Description: "Lists all server-side message rules configured on the Inbox folder. Each rule defines conditions that trigger automatic actions on incoming messages (move, forward, categorize, mark read, delete). Rules apply only to the Inbox folder. Requires MAIL_MANAGE_ENABLED=true and MailboxSettings.ReadWrite scope.",
+		Examples: []tools.Example{
+			{Args: map[string]any{}, Comment: "list all inbox rules"},
+		},
+		SeeDocs: []string{"concepts#mail-gating"},
+		Handler: wrap("mail.list_rules", "read", tools.NewHandleListRules(rc, c.timeout)),
+		Annotations: []mcp.ToolOption{
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithOpenWorldHintAnnotation(true),
+		},
+		Schema: []mcp.ToolOption{
+			mcp.WithString("account",
+				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
+			),
+			mcp.WithString("output",
+				mcp.Description("Output mode: 'text' (default), 'summary', or 'raw'."),
+				mcp.Enum("text", "summary", "raw"),
+			),
+		},
+	}
+}
+
+// buildGetRuleVerb constructs the get_rule Verb (MailManageEnabled-gated).
+func buildGetRuleVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
+	return tools.Verb{
+		Name:        "get_rule",
+		Summary:     "get full details of a single inbox rule by ID",
+		Description: "Retrieves full details of a single inbox message rule including all conditions, actions, and exceptions. Use list_rules to obtain rule IDs. Rules apply only to the Inbox folder. Requires MAIL_MANAGE_ENABLED=true and MailboxSettings.ReadWrite scope.",
+		SeeDocs:     []string{"concepts#mail-gating"},
+		Handler:     wrap("mail.get_rule", "read", tools.NewHandleGetRule(rc, c.timeout)),
+		Annotations: []mcp.ToolOption{
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithOpenWorldHintAnnotation(true),
+		},
+		Schema: []mcp.ToolOption{
+			mcp.WithString("rule_id",
+				mcp.Required(),
+				mcp.Description("The unique identifier of the inbox rule."),
+			),
+			mcp.WithString("account",
+				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
+			),
+			mcp.WithString("output",
+				mcp.Description("Output mode: 'text' (default), 'summary', or 'raw'."),
+				mcp.Enum("text", "summary", "raw"),
+			),
+		},
+	}
+}
+
+// buildCreateRuleVerb constructs the create_rule Verb (MailManageEnabled-gated).
+func buildCreateRuleVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
+	return tools.Verb{
+		Name:    "create_rule",
+		Summary: "create a new inbox message rule with conditions and actions",
+		Description: "Creates a new server-side message rule on the Inbox folder. Rules automatically " +
+			"process incoming messages matching the specified conditions by executing the specified actions.\n\n" +
+			"The 'conditions' parameter is a JSON object with fields like: senderContains (string array), " +
+			"subjectContains (string array), fromAddresses (array of {emailAddress:{address,name}}), " +
+			"hasAttachments (bool), importance (low/normal/high), sentToMe (bool).\n\n" +
+			"The 'actions' parameter is a JSON object with fields like: moveToFolder (folder ID string), " +
+			"copyToFolder (folder ID string), forwardTo (array of {emailAddress:{address,name}}), " +
+			"markAsRead (bool), assignCategories (string array), delete (bool), " +
+			"permanentDelete (bool — WARNING: irrecoverable), stopProcessingRules (bool).\n\n" +
+			"Rules apply only to the Inbox folder. Requires MAIL_MANAGE_ENABLED=true.",
+		Examples: []tools.Example{
+			{
+				Args: map[string]any{
+					"display_name": "Move GitHub notifications",
+					"conditions":   `{"senderContains":["notifications@github.com"]}`,
+					"actions":      `{"moveToFolder":"FOLDER_ID"}`,
+				},
+				Comment: "move messages from a sender to a folder",
+			},
+			{
+				Args: map[string]any{
+					"display_name": "Flag important mail",
+					"conditions":   `{"importance":"high"}`,
+					"actions":      `{"assignCategories":["Important"],"stopProcessingRules":true}`,
+				},
+				Comment: "categorize high-importance messages",
+			},
+		},
+		SeeDocs: []string{"concepts#mail-gating"},
+		Handler: wrapWrite("mail.create_rule", "write", tools.NewHandleCreateRule(rc, c.timeout)),
+		Annotations: []mcp.ToolOption{
+			mcp.WithReadOnlyHintAnnotation(false),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(false),
+			mcp.WithOpenWorldHintAnnotation(true),
+		},
+		Schema: []mcp.ToolOption{
+			mcp.WithString("display_name",
+				mcp.Required(),
+				mcp.Description("Human-readable name for the rule."),
+			),
+			mcp.WithString("conditions",
+				mcp.Required(),
+				mcp.Description("JSON object of messageRulePredicates (e.g. {\"senderContains\":[\"alice\"]})."),
+			),
+			mcp.WithString("actions",
+				mcp.Required(),
+				mcp.Description("JSON object of messageRuleActions (e.g. {\"moveToFolder\":\"FOLDER_ID\"})."),
+			),
+			mcp.WithNumber("sequence",
+				mcp.Description("Execution order among rules. Lower numbers execute first."),
+			),
+			mcp.WithBoolean("is_enabled",
+				mcp.Description("Whether the rule is enabled (default true)."),
+			),
+			mcp.WithString("exceptions",
+				mcp.Description("JSON object of messageRulePredicates for exception conditions."),
+			),
+			mcp.WithString("account",
+				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
+			),
+		},
+	}
+}
+
+// buildUpdateRuleVerb constructs the update_rule Verb (MailManageEnabled-gated).
+func buildUpdateRuleVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
+	return tools.Verb{
+		Name:        "update_rule",
+		Summary:     "update an existing inbox rule (PATCH semantics; read-only rules rejected by API)",
+		Description: "Updates fields of an existing inbox message rule using PATCH semantics: only supplied fields are changed. Rules with isReadOnly=true cannot be modified via the API. Requires MAIL_MANAGE_ENABLED=true.",
+		Examples: []tools.Example{
+			{Args: map[string]any{"rule_id": "RULE_ID", "is_enabled": false}, Comment: "disable a rule"},
+		},
+		SeeDocs: []string{"concepts#mail-gating"},
+		Handler: wrapWrite("mail.update_rule", "write", tools.NewHandleUpdateRule(rc, c.timeout)),
+		Annotations: []mcp.ToolOption{
+			mcp.WithReadOnlyHintAnnotation(false),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithOpenWorldHintAnnotation(true),
+		},
+		Schema: []mcp.ToolOption{
+			mcp.WithString("rule_id",
+				mcp.Required(),
+				mcp.Description("The unique identifier of the inbox rule to update."),
+			),
+			mcp.WithString("display_name",
+				mcp.Description("New display name for the rule."),
+			),
+			mcp.WithNumber("sequence",
+				mcp.Description("New execution order."),
+			),
+			mcp.WithBoolean("is_enabled",
+				mcp.Description("Enable or disable the rule."),
+			),
+			mcp.WithString("conditions",
+				mcp.Description("JSON object of messageRulePredicates (replaces existing conditions)."),
+			),
+			mcp.WithString("actions",
+				mcp.Description("JSON object of messageRuleActions (replaces existing actions)."),
+			),
+			mcp.WithString("exceptions",
+				mcp.Description("JSON object of messageRulePredicates for exception conditions (replaces existing)."),
+			),
+			mcp.WithString("account",
+				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
+			),
+		},
+	}
+}
+
+// buildDeleteRuleVerb constructs the delete_rule Verb (MailManageEnabled-gated).
+func buildDeleteRuleVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
+	return tools.Verb{
+		Name:        "delete_rule",
+		Summary:     "permanently delete an inbox rule (irreversible; read-only rules rejected by API)",
+		Description: "Permanently deletes an inbox message rule. This operation is irreversible. Rules with isReadOnly=true cannot be deleted via the API. Rules apply only to the Inbox folder. Requires MAIL_MANAGE_ENABLED=true.",
+		SeeDocs:     []string{"concepts#mail-gating"},
+		Handler:     wrapWrite("mail.delete_rule", "delete", tools.NewHandleDeleteRule(rc, c.timeout)),
+		Annotations: []mcp.ToolOption{
+			mcp.WithReadOnlyHintAnnotation(false),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithOpenWorldHintAnnotation(true),
+		},
+		Schema: []mcp.ToolOption{
+			mcp.WithString("rule_id",
+				mcp.Required(),
+				mcp.Description("The unique identifier of the inbox rule to delete."),
 			),
 			mcp.WithString("account",
 				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),

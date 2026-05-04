@@ -33,6 +33,13 @@ const mailScope = "Mail.Read"
 // requested: sending remains a user-only action performed in Outlook.
 const mailReadWriteScope = "Mail.ReadWrite"
 
+// mailboxSettingsScope is the OAuth scope required for managing inbox message
+// rules via the Microsoft Graph messageRules API. The Graph API requires
+// MailboxSettings.ReadWrite for all rule operations (including reads); there
+// is no read-only scope for rules. This scope is requested alongside
+// Mail.ReadWrite when MailManageEnabled is true (CR-0066).
+const mailboxSettingsScope = "MailboxSettings.ReadWrite"
+
 // Scopes returns the OAuth scope slice based on the application configuration.
 // The calendar scope is always included. Mail scopes are selected according to
 // configuration:
@@ -57,7 +64,7 @@ func Scopes(cfg config.Config) []string {
 	scopes := []string{calendarScope}
 	switch {
 	case cfg.MailManageEnabled:
-		scopes = append(scopes, mailReadWriteScope)
+		scopes = append(scopes, mailReadWriteScope, mailboxSettingsScope)
 	case cfg.MailEnabled:
 		scopes = append(scopes, mailScope)
 	}

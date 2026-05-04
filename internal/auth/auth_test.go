@@ -573,13 +573,13 @@ func TestScopes_WithMail(t *testing.T) {
 }
 
 // TestScopes_MailManage validates that Scopes returns calendar + Mail.ReadWrite
-// (and not Mail.Read) when MailManageEnabled is true.
+// + MailboxSettings.ReadWrite (and not Mail.Read) when MailManageEnabled is true.
 func TestScopes_MailManage(t *testing.T) {
 	cfg := config.Config{MailEnabled: true, MailManageEnabled: true}
 	scopes := Scopes(cfg)
 
-	if len(scopes) != 2 {
-		t.Fatalf("Scopes() returned %d scopes, want 2", len(scopes))
+	if len(scopes) != 3 {
+		t.Fatalf("Scopes() returned %d scopes, want 3; got %v", len(scopes), scopes)
 	}
 	if scopes[0] != "Calendars.ReadWrite" {
 		t.Errorf("Scopes()[0] = %q, want %q", scopes[0], "Calendars.ReadWrite")
@@ -587,9 +587,46 @@ func TestScopes_MailManage(t *testing.T) {
 	if scopes[1] != "Mail.ReadWrite" {
 		t.Errorf("Scopes()[1] = %q, want %q", scopes[1], "Mail.ReadWrite")
 	}
+	if scopes[2] != "MailboxSettings.ReadWrite" {
+		t.Errorf("Scopes()[2] = %q, want %q", scopes[2], "MailboxSettings.ReadWrite")
+	}
 	for _, s := range scopes {
 		if s == "Mail.Read" {
 			t.Errorf("Scopes() must not include Mail.Read when MailManageEnabled is true; got %v", scopes)
+		}
+	}
+}
+
+// TestScopes_MailManageIncludesMailboxSettings validates that MailManageEnabled
+// requests MailboxSettings.ReadWrite for inbox rule management (CR-0066).
+func TestScopes_MailManageIncludesMailboxSettings(t *testing.T) {
+	cfg := config.Config{MailManageEnabled: true}
+	scopes := Scopes(cfg)
+
+	var hasMailboxSettings bool
+	for _, s := range scopes {
+		if s == "MailboxSettings.ReadWrite" {
+			hasMailboxSettings = true
+		}
+	}
+	if !hasMailboxSettings {
+		t.Errorf("Scopes() must include MailboxSettings.ReadWrite when MailManageEnabled is true; got %v", scopes)
+	}
+}
+
+// TestScopes_NoMailboxSettingsWithoutManage validates that MailboxSettings.ReadWrite
+// is not requested when MailManageEnabled is false (CR-0066).
+func TestScopes_NoMailboxSettingsWithoutManage(t *testing.T) {
+	cases := []config.Config{
+		{},
+		{MailEnabled: true},
+	}
+	for i, cfg := range cases {
+		scopes := Scopes(cfg)
+		for _, s := range scopes {
+			if s == "MailboxSettings.ReadWrite" {
+				t.Errorf("case %d: Scopes() must not include MailboxSettings.ReadWrite; got %v", i, scopes)
+			}
 		}
 	}
 }

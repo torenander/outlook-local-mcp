@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/desek/outlook-local-mcp/internal/graph"
+	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
 
 // FormatEventsText formats a slice of serialized summary event maps into a
@@ -820,5 +823,77 @@ func FormatWriteConfirmation(action, subject, eventID, displayTime, location str
 	if location != "" {
 		fmt.Fprintf(&b, "\nLocation: %s", location)
 	}
+	return b.String()
+}
+
+// FormatRulesText formats a slice of MessageRuleable into a numbered
+// plain-text listing with display name, sequence, enabled state, and brief
+// conditions/actions summary.
+//
+// Parameters:
+//   - rules: slice of models.MessageRuleable from the Graph SDK.
+//
+// Returns a formatted plain-text string. Returns "No inbox rules found."
+// when the slice is empty.
+//
+// Side effects: none.
+func FormatRulesText(rules []models.MessageRuleable) string {
+	if len(rules) == 0 {
+		return "No inbox rules found."
+	}
+	var b strings.Builder
+	for i, rule := range rules {
+		name := graph.SafeStr(rule.GetDisplayName())
+		if name == "" {
+			name = "(Unnamed)"
+		}
+		enabled := "enabled"
+		if !graph.SafeBool(rule.GetIsEnabled()) {
+			enabled = "disabled"
+		}
+		fmt.Fprintf(&b, "%d. %s (seq %d, %s)\n",
+			i+1, name, graph.SafeInt32(rule.GetSequence()), enabled)
+		fmt.Fprintf(&b, "   Conditions: %s\n", graph.SummarizePredicates(rule.GetConditions()))
+		fmt.Fprintf(&b, "   Actions: %s\n", graph.SummarizeActions(rule.GetActions()))
+	}
+	fmt.Fprintf(&b, "\n%d rule(s) total.", len(rules))
+	return b.String()
+}
+
+// FormatRuleDetailText formats a single MessageRuleable into a detailed
+// plain-text view including all conditions, actions, and exceptions.
+//
+// Parameters:
+//   - rule: a models.MessageRuleable from the Graph SDK. Must not be nil.
+//
+// Returns a formatted plain-text string with all rule fields.
+//
+// Side effects: none.
+func FormatRuleDetailText(rule models.MessageRuleable) string {
+	var b strings.Builder
+	name := graph.SafeStr(rule.GetDisplayName())
+	if name == "" {
+		name = "(Unnamed)"
+	}
+	fmt.Fprintf(&b, "Rule: %s\n", name)
+	fmt.Fprintf(&b, "ID: %s\n", graph.SafeStr(rule.GetId()))
+	fmt.Fprintf(&b, "Sequence: %d\n", graph.SafeInt32(rule.GetSequence()))
+
+	enabled := "Yes"
+	if !graph.SafeBool(rule.GetIsEnabled()) {
+		enabled = "No"
+	}
+	fmt.Fprintf(&b, "Enabled: %s\n", enabled)
+
+	if graph.SafeBool(rule.GetIsReadOnly()) {
+		fmt.Fprintf(&b, "Read-only: Yes (cannot be modified or deleted via API)\n")
+	}
+	if graph.SafeBool(rule.GetHasError()) {
+		fmt.Fprintf(&b, "Has error: Yes\n")
+	}
+
+	fmt.Fprintf(&b, "Conditions: %s\n", graph.SummarizePredicates(rule.GetConditions()))
+	fmt.Fprintf(&b, "Actions: %s\n", graph.SummarizeActions(rule.GetActions()))
+	fmt.Fprintf(&b, "Exceptions: %s", graph.SummarizePredicates(rule.GetExceptions()))
 	return b.String()
 }

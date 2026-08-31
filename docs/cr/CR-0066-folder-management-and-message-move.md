@@ -90,6 +90,28 @@ Extend `list_folders` in the read tier, and add four write verbs to the `MailMan
 
 The four write verbs require `Mail.ReadWrite` scope (already requested when `MailManageEnabled=true`). `list_folders` requires only `Mail.Read`. The read verb supports the three-tier output model (text/summary/raw). Write verbs return text confirmations.
 
+### Why ids are the wrong default currency
+
+Mail folder ids measured against a live Microsoft 365 mailbox are **120
+characters** of URL-safe base64:
+
+```
+AQMkADhkN2JlZQBhYi1lMjNhLTRjNDctYTVmMi0wMjhiNTliMWYyNzIALgAAAyxSSpj_kzdFju-9dZN_ICwBAIbY0YMDKXBOtEoMTonV13QAAAIBDAAAAA==
+```
+
+Base64 tokenizes poorly — roughly **30 to 40 tokens per id** — so a 40-folder
+listing spends on the order of **1,500 tokens on identifiers alone**, before a
+single folder name is transmitted. That is the concrete cost behind the
+review's token-efficiency point, and the reason the default text tier drops ids
+entirely and labels folders by path instead. Callers that genuinely need ids
+ask for `output=summary` or `output=raw`.
+
+The same measurement bounds the id-detection heuristic: observed ids are three
+times `minGraphFolderIDLen` (40) and use only alphanumerics plus `_`, `-`, `=`,
+while real display names in the same mailbox ("Inbox", "Archive",
+"Conversation History", "Deleted Items") are under 25 characters and contain
+spaces. Nothing realistic sits near the threshold from either side.
+
 ### Folder addressing
 
 Every folder-taking parameter is a *reference*, not an id. `ResolveFolderRef`
@@ -114,6 +136,50 @@ Every folder-taking parameter is a *reference*, not an id. `ResolveFolderRef`
 path, which `list_folders` uses as the prefix for the paths it emits. This is
 what closes the loop: every path printed by the default text tier is a valid
 argument to `folder`, `parent`, and `destination`.
+
+### Alias declaration rule
+
+The prior `*_folder_id` spellings all remain accepted at runtime, but they are
+not all declared in the tool schema, and the difference is deliberate.
+
+Two facts drive it. First, the mcp-go **server** passes undeclared arguments
+through to handlers untouched (verified directly), so an alias works for any
+caller that actually sends it. Second, MCP **clients** forward only the
+arguments a tool schema declares, which is the whole reason
+`dispatch_aggregate_schema.go` exists. So the only question per alias is what
+happens when a stripping client drops it:
+
+| Alias | Declared? | If a client strips it | Cost |
+|---|---|---|---|
+| `folder_id` | No — `list_messages` already declares it | Nothing; it is never stripped | 0 B |
+| `parent_folder_id` | **Yes** | `create_folder` silently creates at the **top level** instead of nested — wrong result, no error | 97 B |
+| `destination_folder_id` | No | `move_message` returns "missing required parameter: destination" — loud and recoverable in one retry | 0 B |
+
+The rule is therefore: **declare an alias only when losing it fails silently.**
+`list_folders` additionally must *not* re-declare `folder_id`, because the
+aggregate union is first-verb-wins and `list_folders` precedes `list_messages`;
+re-declaring would replace `list_messages`' better description for every verb.
+
+Measured effect on the serialized `mail` tool schema:
+
+| Variant | Bytes | vs. pre-CR baseline (5710) |
+|---|---|---|
+| Both aliases declared, verbose descriptions | 6163 | +453 |
+| Both dropped | 5954 | +244 |
+| **Rule applied** (`parent_folder_id` declared, terse; `destination_folder_id` dropped) | **6027** | **+317** |
+
+The rule recovers 136 of the 453 bytes without giving up a single safety
+property. The residual +317 is the honest price of natural-language addressing:
+`folder`, `recursive`, `max_depth`, `parent`, and `destination` are five new
+parameters in a flat union, and they buy the ability to address a folder the
+way a user names it. Set against the ~1,500 tokens of identifier that a
+40-folder listing no longer emits, it is a good trade — the schema is paid once
+per session, the listing is paid on every call.
+
+These verbs have never shipped in a release (0.4.0 is current; this CR targets
+0.8.0), so no released schema ever advertised the `*_folder_id` spellings. The
+aliases are a courtesy to callers that learned them from this branch, not a
+compatibility obligation.
 
 ### Output tiers
 
@@ -141,7 +207,7 @@ in all three tiers.
 * **FR-9:** `list_folders` **MUST** implement three *distinct* output tiers. `summary` **MUST** use tool-native key names (`name`, `unread`, `total`, `subfolder_count`, `path`, `children`, `id`) and `raw` **MUST** use Graph key names (`displayName`, `unreadItemCount`, `totalItemCount`, `childFolderCount`, `id`). The two **MUST NOT** serialize identically.
 * **FR-10:** `list_folders` text output **MUST** be a markdown tree indented two spaces per level, labelling folders by display path rather than Graph id, and **MUST** surface subtrees that failed to load.
 * **FR-11:** Every folder and move verb **MUST** have annotation test assertions. Presence and gating assertions live in `internal/tools/tool_annotations_test.go`; the per-verb readOnly/destructive/idempotent/openWorld matrix lives in `internal/server/mail_verbs_test.go`, because per-verb `Annotations` are consumed when the aggregate tool is built and are not observable from outside the `server` package.
-* **FR-12:** `folder`, `parent`, and `destination` **MUST** accept a Graph well-known folder name, a slash-separated display-name path, a top-level folder display name, or a raw Graph folder id. A reference that resolves to nothing **MUST** produce an error naming the failing segment and the candidates available at that level. The prior spellings `folder_id`, `parent_folder_id`, and `destination_folder_id` **MUST** remain accepted aliases.
+* **FR-12:** `folder`, `parent`, and `destination` **MUST** accept a Graph well-known folder name, a slash-separated display-name path, a top-level folder display name, or a raw Graph folder id. A reference that resolves to nothing **MUST** produce an error naming the failing segment and the candidates available at that level. The prior spellings `folder_id`, `parent_folder_id`, and `destination_folder_id` **MUST** remain accepted at runtime. An alias **MUST** be declared in the tool schema if and only if a client that strips undeclared arguments would cause a *silent* wrong result; aliases whose loss produces a clear error **MUST NOT** be declared, and `list_folders` **MUST NOT** re-declare `folder_id`. See the alias declaration rule above.
 * **FR-13:** `list_folders` **MUST** be available with `MAIL_ENABLED` alone. Folder writes **MUST** remain behind `MAIL_MANAGE_ENABLED`.
 * **FR-14:** No folder listing **MUST** truncate silently. When Graph reports `@odata.nextLink`, the response **MUST** say so in whichever tier is active.
 
@@ -150,7 +216,7 @@ in all three tiers.
 * **NFR-1:** Every level of a recursive `list_folders` call, and every request issued while resolving a folder path, **MUST** use `RetryGraphCall` with 429 backoff to respect Graph API rate limits.
 * **NFR-2:** Each handler **MUST** live in its own file under `internal/tools/` per the project's file isolation convention.
 * **NFR-3:** All exported functions **MUST** have Go doc comments per CLAUDE.md documentation standards.
-* **NFR-4:** The merged verb **MUST NOT** grow the mail tool's operation enum or its top-level description. Measured: description 1745 to 1581 characters, enum 19 to 17 operations.
+* **NFR-4:** The merged verb **MUST NOT** grow the mail tool's operation enum or its top-level description. Measured: description 1745 to 1581 characters, enum 19 to 17 operations. The serialized schema does grow, to 6027 bytes from 5710, because natural-language addressing adds five parameters to the aggregate union; the alias declaration rule holds that growth to +317 bytes rather than +453.
 
 ## Affected Components
 
@@ -218,7 +284,8 @@ in all three tiers.
 * `text_format.go` loses two folder formatters and gains one markdown tree formatter.
 * Five verb builders in `mail_verbs.go`; two removed.
 * Aggregate annotations unchanged (already most-conservative).
-* Mail tool description 1745 to 1581 characters; operation enum 19 to 17. The serialized mail tool schema grows from 5710 to 6163 bytes because path addressing adds `folder`, `recursive`, `max_depth`, `parent`, `destination`, and two alias parameters to the aggregate schema union — the enum and description savings do not fully offset the new parameters.
+* Mail tool description 1745 to 1581 characters; operation enum 19 to 17. The serialized mail tool schema grows from 5710 to **6027** bytes: path addressing adds `folder`, `recursive`, `max_depth`, `parent`, and `destination` to the aggregate union, and the enum and description savings do not fully offset them. The alias declaration rule keeps one of the three legacy aliases in the schema instead of all three, recovering 136 bytes of the 453 the naive version cost.
+* Against that +317 bytes paid once per session, the default text tier stops emitting 120-character folder ids — roughly 30 to 40 tokens each, ~1,500 tokens for a 40-folder listing — on every call.
 
 ### Business Impact
 
@@ -250,6 +317,9 @@ in all three tiers.
 | `folder_serialize_test.go` | `TestSerializeSummaryFolders`, `TestSerializeRawFolders`, `TestSerializeFolders_TiersDiffer` | FR-9 projections | Hand-built listing | Correct key sets, optional keys omitted |
 | `text_format_test.go` | `TestFormatFolderTreeText_*` | FR-10 markdown tree, error and truncation visibility | `FolderListing` values | Indented markdown, no ids, inline annotations |
 | `folder_node_test.go` | `TestCountFolders` | Recursive count | Nested nodes | Includes descendants |
+| `folder_ref_test.go` | `TestLooksLikeGraphFolderID_LiveMailboxID` | Pins the id heuristic to a real 120-char Microsoft 365 folder id and to real display names | Live-captured id + real folder names | Id recognised, names rejected |
+| `internal/server/mail_verbs_test.go` | `TestMailVerbs_AliasDeclarationRule` | Pins which legacy aliases are schema-declared and why | Verb registry | `parent_folder_id` declared; `folder_id` and `destination_folder_id` not |
+| `move_message_test.go` | `TestMoveMessage_AcceptsLegacyDestinationAlias` | Undeclared alias still honoured at runtime | `destination_folder_id` only | Not a missing-parameter error |
 
 ### Tests to Modify
 
@@ -380,8 +450,9 @@ Then the response states that more folders exist than were returned, in whicheve
 |------|-----------|--------|------------|
 | Recursive `list_folders` generates excessive Graph API calls for deep hierarchies | Medium | Medium | `recursive` defaults to false; `max_depth` capped at 10, default 3; RetryGraphCall handles 429 backoff |
 | Path resolution costs one Graph request per path segment | Medium | Low | Well-known names and id-shaped references resolve with no request at all; only display-name paths walk, and each level is a single `$select`-projected listing |
-| A display name that looks like a Graph id is mis-resolved | Low | Medium | The id heuristic runs only after path resolution and top-level name matching have been attempted, so a real folder always wins |
-| Renaming `folder_id` / `parent_folder_id` / `destination_folder_id` breaks existing callers | Medium | Medium | All three old spellings remain accepted aliases at call time; `parent_folder_id` and `destination_folder_id` stay declared in the schema so MCP clients still forward them |
+| A display name that looks like a Graph id is mis-resolved | Low | Medium | The id heuristic runs only after path resolution and top-level name matching have been attempted, so a real folder always wins. Validated against a live mailbox: ids are 120 chars of URL-safe base64, display names are under 25 chars with spaces — no overlap near the 40-char threshold |
+| A Graph folder id fails the id heuristic and is treated as a path | Low | Medium | **Closed.** Live Microsoft 365 folder ids measured at 120 characters with zero characters outside the accepted alphabet. `TestLooksLikeGraphFolderID_LiveMailboxID` pins a real id so a future change to the constant or alphabet fails the build |
+| Renaming `folder_id` / `parent_folder_id` / `destination_folder_id` breaks existing callers | Low | Low | None of the four write verbs has ever shipped in a release, so there are no released callers. All three old spellings are still accepted at runtime, and `parent_folder_id` — the only one whose loss would be silent — stays declared so MCP clients keep forwarding it |
 | move_messages partial failure confuses the LLM | Low | Low | Per-message success/failure reporting with clear summary counts |
 | delete_folder accidentally removes important folders | Low | High | Graph API rejects deletion of well-known folders (Inbox, Sent, Drafts); destructiveHint=true signals the LLM to confirm |
 

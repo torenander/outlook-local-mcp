@@ -601,6 +601,15 @@ Call `{tool: "mail", args: {operation: "get_message", id: "<message ID>", output
 
 ### Step 37 -- Create top-level folder (skip if mail management disabled)
 
+**Gating for Steps 37-44.** These steps cover folder management and message
+filing (CR-0066).
+
+- If `config.features.mail_enabled` from Step 0c is `false`, **skip Steps 37-44** and record them as SKIP.
+- If `config.features.mail_manage_enabled` from Step 0c is `false`, **skip Steps 37-38 and 41-44** (all writes) and record them as SKIP, but still run **Steps 39-40** against whatever folders already exist: `list_folders` is a read verb available with `MAIL_ENABLED` alone. When running Steps 39-40 in this mode, substitute any real folder that has at least one subfolder for "MCP-Test-Folder", and note the substitution in the Comment column.
+
+Steps 37-44 run in order and each depends on the one before it. There is no
+setup outside this block beyond Step 0c's config capture.
+
 Call `{tool: "mail", args: {operation: "create_folder", display_name: "MCP-Test-Folder"}}`.
 
 - **Verify:** Response is plain text containing the new folder ID and display name "MCP-Test-Folder".
@@ -624,7 +633,7 @@ Call `{tool: "mail", args: {operation: "list_folders"}}`.
 - **Verify:** Response is a markdown list, one `- Name — <unread> / <total>` line per top-level folder.
 - **Verify:** "MCP-Test-Folder" appears and is annotated `[+1 subfolders — use recursive=true]`.
 - **Verify:** "MCP-Test-Subfolder" does **not** appear (the default is one level only).
-- **Verify:** No 150-character Graph folder IDs appear in the output.
+- **Verify:** No Graph folder IDs appear in the output. A real ID is ~120 characters of base64 beginning `AAMk`, `AQMk`, or similar — the text tier must show folder *paths* only.
 - **Verify:** The final line reports a folder count and offers a `folder="..."` example.
 - **Fail:** If the output is JSON, contains folder IDs, or descends without being asked.
 

@@ -649,7 +649,7 @@ func buildCreateFolderVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 	return tools.Verb{
 		Name:        "create_folder",
 		Summary:     "create a mail folder, optionally nested under a parent",
-		Description: "Creates a new mail folder. When `parent` is provided the folder is created inside it; otherwise it is created at the top level. `parent` accepts a well-known name (\"inbox\"), a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID. parent_folder_id is accepted as a legacy alias. Requires MAIL_MANAGE_ENABLED=true.",
+		Description: "Creates a new mail folder. When `parent` is provided the folder is created inside it; otherwise it is created at the top level. `parent` accepts a well-known name (\"inbox\"), a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID; parent_folder_id is accepted as an alias. Requires MAIL_MANAGE_ENABLED=true.",
 		Examples: []tools.Example{
 			{Args: map[string]any{"display_name": "Projects"}, Comment: "create a top-level folder"},
 			{Args: map[string]any{"display_name": "Swedfund", "parent": "Inbox/01 Projects"}, Comment: "create a nested folder addressed by path"},
@@ -670,8 +670,12 @@ func buildCreateFolderVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 			mcp.WithString("parent",
 				mcp.Description("Parent folder: well-known name, path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID. Omit for the top level."),
 			),
+			// Declared, unlike the other legacy aliases, because losing it fails
+			// SILENTLY: a client that strips undeclared arguments would turn a
+			// nested create into a top-level create with no error. See the
+			// alias-declaration rule in CR-0066.
 			mcp.WithString("parent_folder_id",
-				mcp.Description("Legacy alias for `parent`. Prefer `parent`."),
+				mcp.Description("Alias for `parent`."),
 			),
 			mcp.WithString("account",
 				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
@@ -685,7 +689,7 @@ func buildDeleteFolderVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 	return tools.Verb{
 		Name:        "delete_folder",
 		Summary:     "permanently delete a mail folder and all its contents (irreversible)",
-		Description: "Permanently deletes a mail folder and all messages and child folders it contains. This operation is irreversible. `folder` accepts a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, a well-known name, or a Graph folder ID; folder_id is accepted as a legacy alias. Well-known folders (Inbox, Sent Items, Drafts) cannot be deleted; the Graph API rejects such requests with HTTP 400. Requires MAIL_MANAGE_ENABLED=true.",
+		Description: "Permanently deletes a mail folder and all messages and child folders it contains. This operation is irreversible. `folder` accepts a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, a well-known name, or a Graph folder ID; folder_id is accepted as an alias. Well-known folders (Inbox, Sent Items, Drafts) cannot be deleted; the Graph API rejects such requests with HTTP 400. Requires MAIL_MANAGE_ENABLED=true.",
 		Examples: []tools.Example{
 			{Args: map[string]any{"folder": "Inbox/01 Projects/Obsolete"}, Comment: "delete a nested folder addressed by path"},
 		},
@@ -714,7 +718,7 @@ func buildMoveMessageVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fun
 	return tools.Verb{
 		Name:        "move_message",
 		Summary:     "move a single message to a different folder",
-		Description: "Moves a single mail message to a destination folder. `destination` accepts a well-known name (\"archive\"), a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID; destination_folder_id is accepted as a legacy alias. The Graph API creates a new copy of the message in the destination folder and returns the new message ID; the original ID becomes invalid. Requires MAIL_MANAGE_ENABLED=true.",
+		Description: "Moves a single mail message to a destination folder. `destination` accepts a well-known name (\"archive\"), a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID. The Graph API creates a new copy of the message in the destination folder and returns the new message ID; the original ID becomes invalid. Requires MAIL_MANAGE_ENABLED=true.",
 		Examples: []tools.Example{
 			{Args: map[string]any{"message_id": "AAMkAG...", "destination": "Archive"}, Comment: "archive a message by folder name"},
 			{Args: map[string]any{"message_id": "AAMkAG...", "destination": "Inbox/01 Projects/Swedfund"}, Comment: "file a message into a nested folder by path"},
@@ -736,9 +740,6 @@ func buildMoveMessageVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fun
 				mcp.Required(),
 				mcp.Description("Destination folder: well-known name, path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID."),
 			),
-			mcp.WithString("destination_folder_id",
-				mcp.Description("Legacy alias for `destination`. Prefer `destination`."),
-			),
 			mcp.WithString("account",
 				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
 			),
@@ -751,7 +752,7 @@ func buildMoveMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 	return tools.Verb{
 		Name:        "move_messages",
 		Summary:     "move multiple messages to a destination folder in batch",
-		Description: "Moves multiple mail messages to a destination folder. `destination` is resolved once for the batch and accepts a well-known name, a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID; destination_folder_id is accepted as a legacy alias. Each message is moved individually; failures do not abort remaining moves. The output reports per-message success or failure. Accepts up to 50 comma-separated message IDs. Requires MAIL_MANAGE_ENABLED=true.",
+		Description: "Moves multiple mail messages to a destination folder. `destination` is resolved once for the batch and accepts a well-known name, a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID. Each message is moved individually; failures do not abort remaining moves. The output reports per-message success or failure. Accepts up to 50 comma-separated message IDs. Requires MAIL_MANAGE_ENABLED=true.",
 		Examples: []tools.Example{
 			{Args: map[string]any{"message_ids": "AAMkAG...,AAMkAG...", "destination": "Archive"}, Comment: "archive several messages at once"},
 		},

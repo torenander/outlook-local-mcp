@@ -85,3 +85,36 @@ func TestMoveMessage_MissingDestination(t *testing.T) {
 		t.Fatal("expected error result when destination_folder_id is missing")
 	}
 }
+
+// TestMoveMessage_AcceptsLegacyDestinationAlias validates that the pre-rename
+// destination_folder_id spelling still satisfies the required destination.
+//
+// The alias is intentionally NOT declared in the verb schema (see the
+// alias-declaration rule in internal/server/mail_verbs_test.go), so MCP
+// clients will not forward it — but the mcp-go server passes undeclared
+// arguments straight through, so a direct JSON-RPC caller that sends it must
+// still be understood rather than told the parameter is missing.
+func TestMoveMessage_AcceptsLegacyDestinationAlias(t *testing.T) {
+	handler := NewHandleMoveMessage(graph.RetryConfig{}, 0)
+
+	client, srv := newTestGraphClient(t, nil)
+	defer srv.Close()
+	ctx := auth.WithGraphClient(context.Background(), client)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"message_id":            "msg-1",
+		"destination_folder_id": "archive",
+	}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The Graph call has no mock backing it, so the move fails — but it must
+	// not fail with the missing-parameter error.
+	if result.IsError {
+		if text := result.Content[0].(mcp.TextContent).Text; text == "missing required parameter: destination" {
+			t.Error("destination_folder_id alias was not accepted as a destination reference")
+		}
+	}
+}

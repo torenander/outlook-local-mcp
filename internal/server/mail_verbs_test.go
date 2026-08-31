@@ -161,3 +161,60 @@ func TestMailVerbs_MergedFolderBrowsing(t *testing.T) {
 		}
 	}
 }
+
+// TestMailVerbs_AliasDeclarationRule pins the rule that decides whether a
+// legacy parameter alias is declared in the schema or accepted at runtime only
+// (CR-0066 amended): **declare an alias only when losing it fails silently.**
+//
+// The mcp-go server passes undeclared arguments through to handlers untouched,
+// so every alias works for a caller that actually sends it. The risk is purely
+// client-side: MCP clients forward only what the tool schema declares. So the
+// question per alias is what happens when a stripping client drops it.
+//
+//   - folder_id      -> list_messages already declares it, so it is never
+//     stripped. list_folders need not re-declare it, and must
+//     not, or its description would override the better one
+//     list_messages contributes to the aggregate union.
+//   - parent_folder_id -> if stripped, create_folder silently creates the folder
+//     at the top level instead of nested. Silent wrong result,
+//     so it is DECLARED.
+//   - destination_folder_id -> if stripped, move_message returns "missing
+//     required parameter: destination". Loud and recoverable,
+//     so it is NOT declared and costs nothing.
+//
+// Changing any of these means re-deriving the rule, not just editing the test.
+func TestMailVerbs_AliasDeclarationRule(t *testing.T) {
+	verbs := buildTestMailVerbs(t, config.Config{
+		AuthRecordPath:    "/tmp/test",
+		CacheName:         "test",
+		AuthMethod:        "browser",
+		MailEnabled:       true,
+		MailManageEnabled: true,
+	})
+
+	declares := func(verb, param string) bool {
+		v := verbByName(t, verbs, verb)
+		_, ok := mcp.NewTool("_introspect", v.Schema...).InputSchema.Properties[param]
+		return ok
+	}
+
+	cases := []struct {
+		verb, param string
+		want        bool
+		because     string
+	}{
+		{"list_folders", "folder", true, "canonical parameter"},
+		{"list_folders", "folder_id", false, "list_messages already declares it; re-declaring would hijack its description"},
+		{"create_folder", "parent", true, "canonical parameter"},
+		{"create_folder", "parent_folder_id", true, "losing it silently creates at top level instead of nested"},
+		{"move_message", "destination", true, "canonical parameter"},
+		{"move_message", "destination_folder_id", false, "losing it fails loudly with a missing-parameter error"},
+		{"move_messages", "destination", true, "canonical parameter"},
+		{"delete_folder", "folder", true, "canonical parameter"},
+	}
+	for _, c := range cases {
+		if got := declares(c.verb, c.param); got != c.want {
+			t.Errorf("%s declares %q = %v, want %v (%s)", c.verb, c.param, got, c.want, c.because)
+		}
+	}
+}

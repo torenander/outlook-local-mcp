@@ -254,3 +254,29 @@ func TestResolveFolderPath_GraphIDResolvesDisplayName(t *testing.T) {
 		t.Errorf("path = %q, want %q", path, "01 Projects")
 	}
 }
+
+// TestLooksLikeGraphFolderID_LiveMailboxID pins the heuristic against a folder
+// id captured from a live Microsoft 365 mailbox. The id is 120 characters of
+// URL-safe base64 — three times minGraphFolderIDLen — and uses only
+// alphanumerics plus '_', '-' and '='.
+//
+// This is the evidence behind the threshold. If a future mailbox type emits
+// ids that fail this test, the constant and its doc comment must be revisited
+// together.
+func TestLooksLikeGraphFolderID_LiveMailboxID(t *testing.T) {
+	const liveID = "AQMkADhkN2JlZQBhYi1lMjNhLTRjNDctYTVmMi0wMjhiNTliMWYyNzIALgAAAyxSSpj_kzdFju-9dZN_ICwBAIbY0YMDKXBOtEoMTonV13QAAAIBDAAAAA=="
+
+	if got := len(liveID); got != 120 {
+		t.Fatalf("sample live id length = %d, want 120 (sample was edited?)", got)
+	}
+	if !looksLikeGraphFolderID(liveID) {
+		t.Error("a real Microsoft 365 folder id must be recognised as an id")
+	}
+
+	// Real display names from the same mailbox must never be mistaken for ids.
+	for _, name := range []string{"Inbox", "Archive", "Conversation History", "Deleted Items", "Sent Items"} {
+		if looksLikeGraphFolderID(name) {
+			t.Errorf("display name %q must not be classified as a Graph id", name)
+		}
+	}
+}

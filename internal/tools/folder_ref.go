@@ -5,7 +5,17 @@
 // Every folder-aware mail verb takes its folder argument as a *reference*
 // rather than an opaque Microsoft Graph id, so an LLM can act on what it read
 // in the default text output ("Inbox/01 Projects") without a second round-trip
-// to recover a 150-character id.
+// to recover the id.
+//
+// The id is worth avoiding. Mail folder ids measured against a live Microsoft
+// 365 mailbox are 120 characters of URL-safe base64, for example:
+//
+//	AQMkADhkN2JlZQBhYi1lMjNhLTRjNDctYTVmMi0wMjhiNTliMWYyNzIALgAAAyxSSpj_kzdFju-9dZN_ICwBAIbY0YMDKXBOtEoMTonV13QAAAIBDAAAAA==
+//
+// Base64 tokenizes poorly — roughly 30 to 40 tokens per id — so a 40-folder
+// listing spends on the order of 1,500 tokens on identifiers before a single
+// folder name is transmitted. Paths cost a handful of tokens and are what the
+// user actually said.
 //
 // A reference is resolved in this order:
 //
@@ -29,8 +39,17 @@ import (
 )
 
 // minGraphFolderIDLen is the shortest string treated as a possible Graph
-// folder id. Real mailFolder ids are base64url blobs well over 100 characters;
-// the threshold only needs to exclude realistic display names.
+// folder id.
+//
+// Do not "tidy" this constant. 40 is a deliberate margin, not a guess. Mail
+// folder ids measured against a live Microsoft 365 mailbox are 120 characters
+// — three times the threshold — and contain no character outside the alphabet
+// looksLikeGraphFolderID accepts. Real folder display names in the same
+// mailbox ("Inbox", "Archive", "Conversation History", "Deleted Items") are
+// under 25 characters and contain spaces, so nothing realistic sits near 40
+// from the other side. Raising the threshold toward the observed 120 would
+// buy nothing and would start rejecting ids from mailbox types not yet
+// measured; lowering it would start capturing long display names.
 const minGraphFolderIDLen = 40
 
 // maxNamesInError is the number of sibling folder names listed in a
@@ -269,10 +288,15 @@ func noMatchError(segment, parent string, candidates []models.MailFolderable, tr
 }
 
 // looksLikeGraphFolderID reports whether ref has the shape of a Microsoft
-// Graph folder id: long, whitespace-free, and drawn only from the base64
-// alphabet plus the URL-safe substitutions.
+// Graph folder id: at least minGraphFolderIDLen characters, whitespace-free,
+// and drawn only from the base64 alphabet plus the URL-safe substitutions.
 //
-// The check is deliberately conservative. It is consulted only after path
+// The alphabet was validated against live mailbox ids, which used only
+// alphanumerics plus '_', '-' and '=' — a strict subset of what is accepted
+// here. '+' and '/' are also allowed so that standard-base64 ids, should any
+// mailbox type emit them, are still recognised.
+//
+// The check is deliberately conservative and is consulted only after path
 // resolution has been attempted, so a display name that happens to look like
 // an id can never shadow a real folder.
 //

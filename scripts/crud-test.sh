@@ -10,7 +10,11 @@
 #   scripts/crud-test.sh [account_label]
 #
 # Defaults: account_label=default, model=claude-sonnet-4-6, thinking effort=low.
-# Override via env: ACCOUNT, MODEL, THINKING.
+# Override via env: ACCOUNT, MODEL, THINKING, MCP_CONFIG.
+#
+#   MCP_CONFIG=/path/to/mcp.json  run against a specific MCP server
+#                                 definition (e.g. an uninstalled build
+#                                 under test) instead of the ambient config.
 set -euo pipefail
 
 ACCOUNT="${ACCOUNT:-${1:-default}}"
@@ -96,10 +100,27 @@ echo "    stream: ${STREAM}"
 # --disable-slash-commands prevents the headless agent from invoking the
 # outlook-llm-tests skill (which would shell back into `make crud-test` and
 # recurse). The agent must execute the test steps directly.
+# MCP_CONFIG optionally points the run at a specific MCP server definition
+# instead of the caller's ambient configuration. This exists so a build can be
+# verified BEFORE it is installed over the binary that every other session
+# uses: point MCP_CONFIG at a JSON file whose command is the build under test.
+# --strict-mcp-config suppresses the ambient servers so the run cannot silently
+# fall back to the installed binary and report a pass for the wrong code.
+MCP_ARGS=()
+if [[ -n "${MCP_CONFIG:-}" ]]; then
+  if [[ ! -s "$MCP_CONFIG" ]]; then
+    echo "ERROR: MCP_CONFIG=${MCP_CONFIG} is missing or empty." >&2
+    exit 2
+  fi
+  MCP_ARGS=(--mcp-config "$MCP_CONFIG" --strict-mcp-config)
+  echo "==> Using MCP config override: ${MCP_CONFIG}"
+fi
+
 /usr/bin/time -p claude --dangerously-skip-permissions \
   --model "$MODEL" \
   --effort "$THINKING" \
   --disable-slash-commands \
+  "${MCP_ARGS[@]}" \
   --output-format stream-json --verbose \
   -p "$PROMPT" \
   > "$STREAM" 2> "$TIMEFILE"

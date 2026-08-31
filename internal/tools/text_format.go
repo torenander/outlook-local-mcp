@@ -575,94 +575,128 @@ func FormatAttachmentsText(atts []map[string]any) string {
 	return b.String()
 }
 
-// FormatMailFoldersText formats a slice of serialized mail folder maps into a
-// numbered plain-text listing with unread and total item counts.
+// FormatFolderTreeText renders a folder listing as an indented markdown tree.
+// It is the default (`text`) output tier for the list_folders verb.
+//
+// Folders are addressed by natural-language path rather than by Graph id: the
+// 150-character ids are what made the previous listing expensive, and the
+// paths keep the cheap output chainable, because every folder-aware verb
+// accepts a path wherever it accepts an id. Callers that need ids can ask for
+// output="summary" or output="raw".
+//
+// Shape (the leading "|" marks the block; it is not part of the output):
+//
+//	|- Inbox — 12 unread / 340
+//	|  - 01 Projects — 0 / 58
+//	|    - Swedfund — 0 / 8
+//	|- Archive — 0 / 1204
+//	|
+//	|4 folders. Target one with folder="Inbox/01 Projects".
+//
+// The word "unread" is printed only when the unread count is non-zero, so the
+// common case costs three tokens instead of four. Subtrees that failed to load
+// and listings that Graph truncated are annotated inline; neither is ever
+// silently omitted.
 //
 // Parameters:
-//   - folders: slice of folder maps (from serializeMailFolder), each expected
-//     to contain "displayName", "unreadItemCount", and "totalItemCount" keys.
+//   - listing: the folder listing to render, including its root path and
+//     root-level truncation flag.
 //
-// Returns a formatted plain-text string. Returns "No folders found." when the
-// slice is nil or empty.
+// Returns the rendered markdown. Returns a "no folders" sentence naming the
+// parent folder when the listing is empty.
 //
 // Side effects: none.
-func FormatMailFoldersText(folders []map[string]any) string {
-	if len(folders) == 0 {
-		return "No folders found."
-	}
-
-	var b strings.Builder
-	for i, f := range folders {
-		name, _ := f["displayName"].(string)
-		if name == "" {
-			name = "(Unnamed)"
+func FormatFolderTreeText(listing FolderListing) string {
+	if len(listing.Nodes) == 0 {
+		if listing.Root != "" {
+			return fmt.Sprintf("No subfolders found under %q.", listing.Root)
 		}
-		unread := toInt(f["unreadItemCount"])
-		total := toInt(f["totalItemCount"])
-		fmt.Fprintf(&b, "%d. %s (%d unread, %d total)\n", i+1, name, unread, total)
-	}
-
-	fmt.Fprintf(&b, "\n%d folder(s) total.", len(folders))
-
-	return b.String()
-}
-
-// FormatFolderTreeText formats a nested slice of serialized folder maps into
-// a tree-structured plain-text listing with indentation showing the hierarchy.
-// Each node is expected to contain "displayName", "unreadItemCount",
-// "totalItemCount", and optionally "children" (a nested []map[string]any).
-//
-// Parameters:
-//   - tree: slice of folder maps at the root level, each potentially containing
-//     a "children" key with nested child folder maps.
-//
-// Returns a formatted plain-text string showing the folder hierarchy with
-// 2-space indentation per level and a total count. Returns "No folders found."
-// when the slice is nil or empty.
-//
-// Side effects: none.
-func FormatFolderTreeText(tree []map[string]any) string {
-	if len(tree) == 0 {
 		return "No folders found."
 	}
 
 	var b strings.Builder
-	total := formatFolderTreeLevel(&b, tree, 0)
+	formatFolderNodes(&b, listing.Nodes, 0)
 
-	fmt.Fprintf(&b, "\n%d folder(s) total.", total)
+	if listing.Truncated {
+		b.WriteString("\n(More folders exist than were returned. Raise max_results to see the rest.)\n")
+	}
+
+	total := CountFolders(listing.Nodes)
+	noun := "folders"
+	if total == 1 {
+		noun = "folder"
+	}
+	fmt.Fprintf(&b, "\n%d %s. Target one with folder=%q.", total, noun, deepestFolderPath(listing.Nodes))
 
 	return b.String()
 }
 
-// formatFolderTreeLevel recursively writes folder entries at a given
-// indentation depth, returning the total count of folders written.
+// formatFolderNodes recursively writes one markdown list item per folder,
+// indenting two spaces per level.
 //
 // Parameters:
-//   - b: the string builder to write to.
-//   - folders: the folders at the current level.
-//   - depth: the current indentation depth (0 = root, each level adds 2 spaces).
-//
-// Returns the total number of folders written at this level and below.
+//   - b: the builder to write to.
+//   - nodes: the folders at the current level.
+//   - depth: the current nesting depth (0 at the requested level).
 //
 // Side effects: writes to b.
-func formatFolderTreeLevel(b *strings.Builder, folders []map[string]any, depth int) int {
+func formatFolderNodes(b *strings.Builder, nodes []FolderNode, depth int) {
 	indent := strings.Repeat("  ", depth)
-	count := 0
-	for _, f := range folders {
-		name, _ := f["displayName"].(string)
+	for _, n := range nodes {
+		name := n.Name
 		if name == "" {
 			name = "(Unnamed)"
 		}
-		unread := toInt(f["unreadItemCount"])
-		total := toInt(f["totalItemCount"])
-		fmt.Fprintf(b, "%s%s (%d unread, %d total)\n", indent, name, unread, total)
-		count++
 
-		if children, ok := f["children"].([]map[string]any); ok && len(children) > 0 {
-			count += formatFolderTreeLevel(b, children, depth+1)
+		counts := fmt.Sprintf("%d / %d", n.Unread, n.Total)
+		if n.Unread > 0 {
+			counts = fmt.Sprintf("%d unread / %d", n.Unread, n.Total)
+		}
+		fmt.Fprintf(b, "%s- %s — %s", indent, name, counts)
+
+		switch {
+		case n.Err != "":
+			fmt.Fprintf(b, " [subfolders unavailable: %s]", n.Err)
+		case n.Truncated:
+			b.WriteString(" [more subfolders not shown — raise max_results]")
+		case len(n.Children) == 0 && n.SubfolderCount > 0:
+			fmt.Fprintf(b, " [+%d subfolders — use recursive=true]", n.SubfolderCount)
+		}
+		b.WriteString("\n")
+
+		formatFolderNodes(b, n.Children, depth+1)
+	}
+}
+
+// deepestFolderPath returns the path of the deepest folder in the tree, which
+// the footer offers as a worked example of the `folder` parameter. Ties are
+// broken by first occurrence so the output is deterministic.
+//
+// Parameters:
+//   - nodes: the folders to search.
+//
+// Returns the deepest path, or "" when nodes is empty.
+//
+// Side effects: none.
+func deepestFolderPath(nodes []FolderNode) string {
+	best, _ := deepestFolderPathAt(nodes, 0)
+	return best
+}
+
+// deepestFolderPathAt is the depth-tracking recursion behind
+// deepestFolderPath. It returns the deepest path found in nodes and the depth
+// at which it was found; depth -1 means nothing was found.
+func deepestFolderPathAt(nodes []FolderNode, depth int) (string, int) {
+	bestPath, bestDepth := "", -1
+	for _, n := range nodes {
+		if depth > bestDepth {
+			bestPath, bestDepth = n.Path, depth
+		}
+		if p, d := deepestFolderPathAt(n.Children, depth+1); d > bestDepth {
+			bestPath, bestDepth = p, d
 		}
 	}
-	return count
+	return bestPath, bestDepth
 }
 
 // toInt converts a numeric value from a map[string]any to int. Handles int32

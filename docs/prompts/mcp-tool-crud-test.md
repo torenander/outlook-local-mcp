@@ -607,59 +607,84 @@ Call `{tool: "mail", args: {operation: "create_folder", display_name: "MCP-Test-
 - **Record** the returned folder ID as **test folder ID**.
 - **Fail:** If the folder was not created or no ID is returned.
 
-### Step 38 -- Create nested child folder
+### Step 38 -- Create nested child folder addressed by name
 
-Call `{tool: "mail", args: {operation: "create_folder", display_name: "MCP-Test-Subfolder", parent_folder_id: "<test folder ID>"}}`.
+Call `{tool: "mail", args: {operation: "create_folder", display_name: "MCP-Test-Subfolder", parent: "MCP-Test-Folder"}}`.
 
-- **Verify:** Response is plain text containing the new child folder ID, display name, and parent folder ID.
+Note the `parent` is the folder **name**, not an ID — this exercises natural-language folder addressing.
+
+- **Verify:** Response is plain text containing the new child folder ID, display name, and the parent reference.
 - **Record** the returned folder ID as **test subfolder ID**.
 - **Fail:** If the folder was not created or the parent reference is missing.
 
-### Step 39 -- List child folders
+### Step 39 -- Browse folders, default single level
 
-Call `{tool: "mail", args: {operation: "list_child_folders", folder_id: "<test folder ID>"}}`.
+Call `{tool: "mail", args: {operation: "list_folders"}}`.
 
-- **Verify:** Response is plain text listing at least one child folder ("MCP-Test-Subfolder").
-- **Fail:** If the subfolder is not listed.
+- **Verify:** Response is a markdown list, one `- Name — <unread> / <total>` line per top-level folder.
+- **Verify:** "MCP-Test-Folder" appears and is annotated `[+1 subfolders — use recursive=true]`.
+- **Verify:** "MCP-Test-Subfolder" does **not** appear (the default is one level only).
+- **Verify:** No 150-character Graph folder IDs appear in the output.
+- **Verify:** The final line reports a folder count and offers a `folder="..."` example.
+- **Fail:** If the output is JSON, contains folder IDs, or descends without being asked.
 
-### Step 40 -- List folder tree
+### Step 40 -- Browse recursively and by path
 
-Call `{tool: "mail", args: {operation: "list_folder_tree", max_depth: 2}}`.
+Call `{tool: "mail", args: {operation: "list_folders", recursive: true, max_depth: 2}}`.
 
-- **Verify:** Response is plain text showing an indented tree structure.
-- **Verify:** "MCP-Test-Folder" appears at the top level and "MCP-Test-Subfolder" appears indented beneath it.
-- **Fail:** If the tree structure is missing or the test folders are not visible.
+- **Verify:** "MCP-Test-Folder" appears at the left margin and "MCP-Test-Subfolder" appears indented two spaces beneath it.
 
-### Step 41 -- Move message to test folder
+Call `{tool: "mail", args: {operation: "list_folders", recursive: true, max_depth: 1}}`.
+
+- **Verify:** "MCP-Test-Subfolder" does **not** appear. `max_depth=1` means exactly one level.
+
+Call `{tool: "mail", args: {operation: "list_folders", folder: "MCP-Test-Folder"}}`.
+
+- **Verify:** Response lists "MCP-Test-Subfolder" and no top-level siblings.
+- **Verify:** The path shown for the subfolder is "MCP-Test-Folder/MCP-Test-Subfolder".
+
+Call `{tool: "mail", args: {operation: "list_folders", folder: "MCP-Test-Folder", output: "summary"}}` and then the same call with `output: "raw"`.
+
+- **Verify:** `summary` is JSON using the keys `name`, `unread`, `total`, `subfolder_count`, `path`, `id`.
+- **Verify:** `raw` is JSON using the Graph keys `displayName`, `unreadItemCount`, `totalItemCount`, `childFolderCount`, `id` under a `value` array.
+- **Verify:** The two payloads are **not** identical.
+
+Call `{tool: "mail", args: {operation: "list_folders", folder: "MCP-Test-Folder/Nope"}}`.
+
+- **Verify:** An error naming the unmatched segment "Nope" and listing the folders that were available at that level.
+- **Fail:** If any of the above verifications fails, or if `list_child_folders` / `list_folder_tree` still exist as operations.
+
+### Step 41 -- Move message into the test folder by name
 
 Using `{tool: "mail", args: {operation: "list_messages", max_results: 1}}`, pick a message and record its ID as **move test message ID**. If no messages exist, skip Steps 41-42.
 
-Call `{tool: "mail", args: {operation: "move_message", message_id: "<move test message ID>", destination_folder_id: "<test folder ID>"}}`.
+Call `{tool: "mail", args: {operation: "move_message", message_id: "<move test message ID>", destination: "MCP-Test-Folder"}}`.
 
-- **Verify:** Response is plain text containing the original message ID, a new message ID, and the destination folder ID.
+- **Verify:** Response is plain text containing the original message ID, a new message ID, and the destination folder reference.
 - **Record** the new message ID as **moved message ID**.
 - **Fail:** If the move fails or no new ID is returned.
 
-### Step 42 -- Batch move messages
+### Step 42 -- Batch move messages back to a well-known folder
 
-Call `{tool: "mail", args: {operation: "move_messages", message_ids: "<moved message ID>", destination_folder_id: "Inbox"}}`.
+Call `{tool: "mail", args: {operation: "move_messages", message_ids: "<moved message ID>", destination: "Inbox"}}`.
 
 - **Verify:** Response reports "Moved 1 of 1 message(s)" with per-message OK status.
+- **Verify:** The well-known name "Inbox" was accepted as a destination without an ID lookup by the caller.
 - **Fail:** If the batch move reports failure.
 
-### Step 43 -- Delete subfolder
+### Step 43 -- Delete subfolder addressed by path
 
-Call `{tool: "mail", args: {operation: "delete_folder", folder_id: "<test subfolder ID>"}}`.
+Call `{tool: "mail", args: {operation: "delete_folder", folder: "MCP-Test-Folder/MCP-Test-Subfolder"}}`.
 
 - **Verify:** Response is plain text confirming the folder was deleted.
 - **Fail:** If the deletion fails.
 
 ### Step 44 -- Delete top-level test folder
 
-Call `{tool: "mail", args: {operation: "delete_folder", folder_id: "<test folder ID>"}}`.
+Call `{tool: "mail", args: {operation: "delete_folder", folder: "MCP-Test-Folder"}}`.
 
 - **Verify:** Response is plain text confirming the folder was deleted.
-- **Verify:** A subsequent `{tool: "mail", args: {operation: "list_child_folders", folder_id: "<test folder ID>"}}` returns an error (folder no longer exists).
+- **Verify:** A subsequent `{tool: "mail", args: {operation: "list_folders", folder: "MCP-Test-Folder"}}` returns an error naming "MCP-Test-Folder" as unmatched at the top level.
 - **Fail:** If the folder still exists after deletion.
 
 ## Reporting
@@ -728,12 +753,12 @@ After all steps, print a summary table. Every row **MUST** include a short `Comm
 | 35   | Get conversation                  | PASS/FAIL/SKIP | e.g., "thread returned in chronological order"           |
 | 36   | Get attachment                    | PASS/FAIL/SKIP | e.g., "metadata + base64 under size limit"               |
 | 37   | Create top-level folder           | PASS/FAIL/SKIP | e.g., "MCP-Test-Folder created with ID"                  |
-| 38   | Create nested child folder        | PASS/FAIL/SKIP | e.g., "MCP-Test-Subfolder created under parent"          |
-| 39   | List child folders                | PASS/FAIL/SKIP | e.g., "subfolder listed in children"                     |
-| 40   | List folder tree                  | PASS/FAIL/SKIP | e.g., "indented tree with test folders"                  |
-| 41   | Move message to folder            | PASS/FAIL/SKIP | e.g., "message moved, new ID returned"                   |
-| 42   | Batch move messages               | PASS/FAIL/SKIP | e.g., "1 of 1 moved successfully"                        |
-| 43   | Delete subfolder                  | PASS/FAIL/SKIP | e.g., "subfolder deleted"                                |
+| 38   | Create nested folder by name      | PASS/FAIL/SKIP | e.g., "MCP-Test-Subfolder created via parent name"       |
+| 39   | Browse folders (default 1 level)  | PASS/FAIL/SKIP | e.g., "markdown tree, no IDs, subfolder hint shown"      |
+| 40   | Browse recursive / by path / tiers| PASS/FAIL/SKIP | e.g., "max_depth honoured, path addressing works, tiers differ" |
+| 41   | Move message by folder name       | PASS/FAIL/SKIP | e.g., "message moved, new ID returned"                   |
+| 42   | Batch move to well-known folder   | PASS/FAIL/SKIP | e.g., "1 of 1 moved back to Inbox"                       |
+| 43   | Delete subfolder by path          | PASS/FAIL/SKIP | e.g., "subfolder deleted via path"                       |
 | 44   | Delete top-level test folder      | PASS/FAIL/SKIP | e.g., "folder deleted, 404 on re-fetch"                  |
 ```
 

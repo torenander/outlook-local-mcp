@@ -25,14 +25,24 @@ import (
 // Graph API returns HTTP 400 for those requests, and this handler surfaces
 // that error without additional pre-validation.
 //
+// The folder is addressed by the natural-language `folder` reference — a
+// well-known name, a display-name path such as "Inbox/01 Projects", a
+// top-level folder name, or a raw Graph id — resolved by ResolveFolderRef.
+// The legacy spelling folder_id is still accepted.
+//
 // Parameters:
 //   - retryCfg: retry configuration for transient Graph API errors.
 //   - timeout: the maximum duration for the Graph API call.
 //
 // Returns a handler function compatible with the MCP server's verb dispatch.
 //
-// Side effects: calls DELETE /me/mailFolders/{id} on the Microsoft Graph API,
-// permanently removing the folder and all its contents.
+// Errors: returns a tool error when no account is selected, when `folder` is
+// missing, when it cannot be resolved (the message names the failing path
+// segment), or when the Graph delete call fails.
+//
+// Side effects: resolves `folder` (which may issue folder lookup requests) and
+// calls DELETE /me/mailFolders/{id} on the Microsoft Graph API, permanently
+// removing the folder and all its contents.
 func NewHandleDeleteFolder(retryCfg graph.RetryConfig, timeout time.Duration) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		logger := logging.Logger(ctx)
@@ -43,11 +53,15 @@ func NewHandleDeleteFolder(retryCfg graph.RetryConfig, timeout time.Duration) fu
 			return mcp.NewToolResultError("no account selected"), nil
 		}
 
-		folderID, err := request.RequireString("folder_id")
-		if err != nil {
-			return mcp.NewToolResultError("missing required parameter: folder_id"), nil
+		folderRef := firstStringParam(request, "folder", "folder_id")
+		if folderRef == "" {
+			return mcp.NewToolResultError("missing required parameter: folder"), nil
 		}
-		if err := validate.ValidateResourceID(folderID, "folder_id"); err != nil {
+		if err := validate.ValidateResourceID(folderRef, "folder"); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		folderID, err := ResolveFolderRef(ctx, client, retryCfg, timeout, folderRef)
+		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
@@ -70,7 +84,7 @@ func NewHandleDeleteFolder(retryCfg graph.RetryConfig, timeout time.Duration) fu
 
 		logger.InfoContext(ctx, "folder deleted", "folder_id", folderID, "duration", time.Since(start))
 
-		response := fmt.Sprintf("Folder deleted: %s\nThe folder and all its contents have been permanently removed.", folderID)
+		response := fmt.Sprintf("Folder deleted: %s\nID: %s\nThe folder and all its contents have been permanently removed.", folderRef, folderID)
 		if line := AccountInfoLine(ctx); line != "" {
 			response += "\n" + line
 		}

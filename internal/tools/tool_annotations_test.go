@@ -294,3 +294,95 @@ func TestPerVerbAnnotations_DocumentedInHelp(t *testing.T) {
 		})
 	}
 }
+
+// operationEnum returns the `operation` enum of an aggregate domain tool.
+func operationEnum(t *testing.T, tool mcp.Tool) []string {
+	t.Helper()
+
+	raw, ok := tool.InputSchema.Properties["operation"]
+	if !ok {
+		t.Fatalf("tool %q has no operation property", tool.Name)
+	}
+	schema, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("tool %q operation property is %T, want map", tool.Name, raw)
+	}
+
+	var names []string
+	switch e := schema["enum"].(type) {
+	case []string:
+		names = append(names, e...)
+	case []any:
+		for _, item := range e {
+			if s, ok := item.(string); ok {
+				names = append(names, s)
+			}
+		}
+	default:
+		t.Fatalf("tool %q operation enum is %T", tool.Name, schema["enum"])
+	}
+	return names
+}
+
+// TestMailAnnotations_FolderVerbsPresent verifies that the folder and move
+// verbs appear in the mail operation enum when MailManageEnabled=true
+// (CR-0066 FR-11), and that the two verbs merged into list_folders do not.
+//
+// The per-verb annotation matrix (readOnly/destructive/idempotent/openWorld,
+// including delete_folder's destructiveHint=true for AC-6) is asserted in
+// internal/server/mail_verbs_test.go: per-verb Annotations are consumed when
+// the aggregate tool is built and are not observable from outside the server
+// package.
+func TestMailAnnotations_FolderVerbsPresent(t *testing.T) {
+	s := buildTestServer(t, config.Config{
+		AuthRecordPath:    "/tmp/test",
+		CacheName:         "test",
+		AuthMethod:        "browser",
+		MailEnabled:       true,
+		MailManageEnabled: true,
+	})
+	enum := operationEnum(t, getRegisteredTool(t, s, "mail"))
+
+	present := make(map[string]bool, len(enum))
+	for _, name := range enum {
+		present[name] = true
+	}
+
+	for _, want := range []string{"list_folders", "create_folder", "delete_folder", "move_message", "move_messages"} {
+		if !present[want] {
+			t.Errorf("mail operation enum missing %q; got %v", want, enum)
+		}
+	}
+	for _, merged := range []string{"list_child_folders", "list_folder_tree"} {
+		if present[merged] {
+			t.Errorf("mail operation enum still contains merged verb %q; got %v", merged, enum)
+		}
+	}
+}
+
+// TestMailAnnotations_FolderWriteVerbsAbsent verifies that the folder write
+// verbs are absent when MailManageEnabled=false, while list_folders — a read
+// covered by Mail.Read — remains available (CR-0066 amended B4, AC-9).
+func TestMailAnnotations_FolderWriteVerbsAbsent(t *testing.T) {
+	s := buildTestServer(t, config.Config{
+		AuthRecordPath: "/tmp/test",
+		CacheName:      "test",
+		AuthMethod:     "browser",
+		MailEnabled:    true,
+	})
+	enum := operationEnum(t, getRegisteredTool(t, s, "mail"))
+
+	present := make(map[string]bool, len(enum))
+	for _, name := range enum {
+		present[name] = true
+	}
+
+	if !present["list_folders"] {
+		t.Errorf("list_folders must remain available without MAIL_MANAGE_ENABLED; got %v", enum)
+	}
+	for _, gated := range []string{"create_folder", "delete_folder", "move_message", "move_messages"} {
+		if present[gated] {
+			t.Errorf("mail operation enum should not contain %q without MAIL_MANAGE_ENABLED; got %v", gated, enum)
+		}
+	}
+}

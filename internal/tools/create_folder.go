@@ -20,9 +20,14 @@ import (
 )
 
 // NewHandleCreateFolder creates a tool handler that creates a new mail folder
-// via the Microsoft Graph API. When parent_folder_id is provided, the folder
-// is created as a child of that parent; otherwise it is created at the
-// top level under msgFolderRoot.
+// via the Microsoft Graph API. When `parent` is provided, the folder is
+// created as a child of that parent; otherwise it is created at the top level
+// under msgFolderRoot.
+//
+// `parent` is a natural-language folder reference — a well-known name, a
+// display-name path such as "Inbox/01 Projects", a top-level folder name, or a
+// raw Graph id — resolved by ResolveFolderRef. The legacy spelling
+// parent_folder_id is still accepted.
 //
 // Parameters:
 //   - retryCfg: retry configuration for transient Graph API errors.
@@ -33,13 +38,18 @@ import (
 // The handler:
 //   - Retrieves the Graph client from context via GraphClient.
 //   - Validates the required display_name parameter.
-//   - Optionally validates parent_folder_id if provided.
+//   - Resolves `parent` to a folder id when provided.
 //   - Constructs a MailFolder model with the display name.
-//   - POSTs to the appropriate endpoint based on parent_folder_id presence.
+//   - POSTs to the appropriate endpoint based on whether a parent was given.
 //   - Returns a text confirmation with the new folder's ID and display name.
 //
-// Side effects: calls POST /me/mailFolders or
-// POST /me/mailFolders/{id}/childFolders on the Microsoft Graph API.
+// Errors: returns a tool error when no account is selected, when display_name
+// is missing, blank or over-long, when `parent` cannot be resolved, or when
+// the Graph create call fails.
+//
+// Side effects: resolves `parent` (which may issue folder lookup requests) and
+// calls POST /me/mailFolders or POST /me/mailFolders/{id}/childFolders on the
+// Microsoft Graph API.
 func NewHandleCreateFolder(retryCfg graph.RetryConfig, timeout time.Duration) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		logger := logging.Logger(ctx)
@@ -63,9 +73,16 @@ func NewHandleCreateFolder(retryCfg graph.RetryConfig, timeout time.Duration) fu
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		parentFolderID := request.GetString("parent_folder_id", "")
-		if parentFolderID != "" {
-			if err := validate.ValidateResourceID(parentFolderID, "parent_folder_id"); err != nil {
+		// Accept the natural-language `parent` reference, falling back to the
+		// legacy parent_folder_id spelling.
+		parentRef := firstStringParam(request, "parent", "parent_folder_id")
+		parentFolderID := ""
+		if parentRef != "" {
+			if err := validate.ValidateResourceID(parentRef, "parent"); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			parentFolderID, err = ResolveFolderRef(ctx, client, retryCfg, timeout, parentRef)
+			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 		}
@@ -116,8 +133,8 @@ func NewHandleCreateFolder(retryCfg graph.RetryConfig, timeout time.Duration) fu
 			"duration", time.Since(start))
 
 		response := fmt.Sprintf("Folder created: %s\nID: %s", folderName, folderID)
-		if parentFolderID != "" {
-			response += fmt.Sprintf("\nParent folder: %s", parentFolderID)
+		if parentRef != "" {
+			response += fmt.Sprintf("\nParent folder: %s", parentRef)
 		}
 		if line := AccountInfoLine(ctx); line != "" {
 			response += "\n" + line

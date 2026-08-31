@@ -29,14 +29,25 @@ import (
 //
 // Returns a handler function compatible with the MCP server's verb dispatch.
 //
+// The destination is given as the natural-language `destination` reference —
+// a well-known name, a display-name path such as "Inbox/01 Projects", a
+// top-level folder name, or a raw Graph id — resolved by ResolveFolderRef.
+// The legacy spelling destination_folder_id is still accepted.
+//
 // The handler:
 //   - Retrieves the Graph client from context via GraphClient.
-//   - Validates both message_id and destination_folder_id parameters.
+//   - Validates message_id and `destination`.
+//   - Resolves `destination` to a folder id.
 //   - Constructs the move request body with the destination folder ID.
 //   - Calls POST /me/messages/{id}/move.
 //   - Returns a text confirmation with the new message ID.
 //
-// Side effects: calls POST /me/messages/{id}/move on the Microsoft Graph API,
+// Errors: returns a tool error when no account is selected, when either
+// required parameter is missing, when `destination` cannot be resolved, or
+// when the Graph move call fails.
+//
+// Side effects: resolves `destination` (which may issue folder lookup
+// requests) and calls POST /me/messages/{id}/move on the Microsoft Graph API,
 // relocating the message to a new folder.
 func NewHandleMoveMessage(retryCfg graph.RetryConfig, timeout time.Duration) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -56,11 +67,15 @@ func NewHandleMoveMessage(retryCfg graph.RetryConfig, timeout time.Duration) fun
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		destFolderID, err := request.RequireString("destination_folder_id")
-		if err != nil {
-			return mcp.NewToolResultError("missing required parameter: destination_folder_id"), nil
+		destRef := firstStringParam(request, "destination", "destination_folder_id")
+		if destRef == "" {
+			return mcp.NewToolResultError("missing required parameter: destination"), nil
 		}
-		if err := validate.ValidateResourceID(destFolderID, "destination_folder_id"); err != nil {
+		if err := validate.ValidateResourceID(destRef, "destination"); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		destFolderID, err := ResolveFolderRef(ctx, client, retryCfg, timeout, destRef)
+		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
@@ -100,7 +115,7 @@ func NewHandleMoveMessage(retryCfg graph.RetryConfig, timeout time.Duration) fun
 			"destination_folder_id", destFolderID,
 			"duration", time.Since(start))
 
-		response := fmt.Sprintf("Message moved successfully.\nOriginal ID: %s\nNew ID: %s\nDestination folder: %s", messageID, newMessageID, destFolderID)
+		response := fmt.Sprintf("Message moved successfully.\nOriginal ID: %s\nNew ID: %s\nDestination folder: %s", messageID, newMessageID, destRef)
 		if line := AccountInfoLine(ctx); line != "" {
 			response += "\n" + line
 		}

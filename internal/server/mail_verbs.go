@@ -9,9 +9,12 @@
 //     get_message, search_messages.
 //   - Gated by MailEnabled: get_conversation, list_attachments, get_attachment.
 //   - Gated by MailManageEnabled: create_draft, create_reply_draft,
-//     create_forward_draft, update_draft, delete_draft,
-//     list_child_folders, list_folder_tree, create_folder, delete_folder,
-//     move_message, move_messages.
+//     create_forward_draft, update_draft, delete_draft, create_folder,
+//     delete_folder, move_message, move_messages.
+//
+// Folder browsing is NOT MailManageEnabled-gated: list_folders is a read that
+// works with the Mail.Read scope, so it stays in the read tier alongside
+// list_messages (CR-0066 amended, reversing that CR's rejected alternative 1).
 //
 // The aggregate "mail" tool is registered unconditionally (FR-1). The operation
 // enum only includes verbs whose feature flag is enabled at server start (FR-2).
@@ -75,8 +78,9 @@ type mailVerbsConfig struct {
 //   - MailEnabled-gated: get_conversation, list_attachments, get_attachment
 //     (require Mail.Read scope provided by MailEnabled).
 //   - MailManageEnabled-gated: create_draft, create_reply_draft,
-//     create_forward_draft, update_draft, delete_draft (require
-//     Mail.ReadWrite scope provided by MailManageEnabled).
+//     create_forward_draft, update_draft, delete_draft, create_folder,
+//     delete_folder, move_message, move_messages (require Mail.ReadWrite
+//     scope provided by MailManageEnabled).
 //
 // Each verb's Handler is pre-wrapped with authMW, accountResolverMW,
 // observability, and audit middleware using the fully-qualified identity
@@ -136,9 +140,8 @@ func buildMailVerbs(c mailVerbsConfig) ([]tools.Verb, *tools.VerbRegistry) {
 			buildCreateForwardDraftVerb(c, rc, wrapWrite),
 			buildUpdateDraftVerb(c, rc, wrapWrite),
 			buildDeleteDraftVerb(c, rc, wrapWrite),
-			// Folder management (read verbs use wrap, write verbs use wrapWrite).
-			buildListChildFoldersVerb(c, rc, wrap),
-			buildListFolderTreeVerb(c, rc, wrap),
+			// Folder management writes. Folder *browsing* is the read-tier
+			// list_folders verb registered above, not gated here.
 			buildCreateFolderVerb(c, rc, wrapWrite),
 			buildDeleteFolderVerb(c, rc, wrapWrite),
 			// Message move operations.
@@ -150,14 +153,29 @@ func buildMailVerbs(c mailVerbsConfig) ([]tools.Verb, *tools.VerbRegistry) {
 	return verbs, registryPtr
 }
 
-// buildListFoldersVerb constructs the list_folders Verb.
+// buildListFoldersVerb constructs the list_folders Verb: the mail domain's
+// single folder-browsing operation (CR-0066 amended).
+//
+// It subsumes the former list_child_folders and list_folder_tree verbs. Those
+// differed from list_folders only in where a listing starts and how deep it
+// goes, so they are now the `folder` and `recursive`/`max_depth` parameters of
+// this verb instead of two extra entries in the operation enum.
+//
+// The verb is registered in the read tier, not behind MailManageEnabled:
+// browsing folders is a read that the Mail.Read scope already covers.
 func buildListFoldersVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
 	return tools.Verb{
 		Name:        "list_folders",
-		Summary:     "list mail folders (Inbox, Sent, Drafts, etc.) with unread and total counts",
-		Description: "Returns all mail folders with their display name, unread message count, and total message count. Use the returned folder IDs with list_messages to scope queries to a specific folder. Requires mail access (MAIL_ENABLED=true).",
-		SeeDocs:     []string{"concepts#mail-gating"},
-		Handler:     wrap("mail.list_folders", "read", tools.NewHandleListMailFolders(rc, c.timeout)),
+		Summary:     "browse mail folders; one level by default, whole tree with recursive=true",
+		Description: "Browses the mail folder hierarchy. Omit `folder` to list the top-level folders; set it to a well-known name (\"inbox\"), a display-name path (\"Inbox/01 Projects\"), a top-level folder name, or a Graph folder ID to list that folder's subfolders. Set recursive=true to descend, with max_depth counting the level you asked for (max_depth=1 is exactly one level). Default text output is a markdown tree labelled by path, not by 150-character Graph IDs — every path it prints is accepted back by `folder` here and by `parent`, `destination`, and `folder_id` on the other mail verbs, so the cheap output stays chainable. Use output=summary for JSON including IDs, or output=raw for the unmodified Graph fields. Listings that Graph truncates say so; nothing is capped silently.",
+		Examples: []tools.Example{
+			{Args: map[string]any{}, Comment: "list the top-level folders"},
+			{Args: map[string]any{"folder": "Inbox", "recursive": true}, Comment: "list everything under Inbox, 3 levels deep"},
+			{Args: map[string]any{"folder": "Inbox/01 Projects"}, Comment: "list one level under a nested folder, addressed by path"},
+			{Args: map[string]any{"recursive": true, "max_depth": 2, "output": "summary"}, Comment: "two-level tree as JSON, including folder IDs"},
+		},
+		SeeDocs: []string{"concepts#output-tiers", "concepts#mail-gating"},
+		Handler: wrap("mail.list_folders", "read", tools.NewHandleListFolders(rc, c.timeout)),
 		Annotations: []mcp.ToolOption{
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithDestructiveHintAnnotation(false),
@@ -165,12 +183,27 @@ func buildListFoldersVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(str
 			mcp.WithOpenWorldHintAnnotation(true),
 		},
 		Schema: []mcp.ToolOption{
-			mcp.WithString("account",
-				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
+			// folder_id is accepted as a legacy alias at call time. It is not
+			// declared here because list_messages already contributes it to the
+			// aggregate schema with a description that suits that verb better.
+			mcp.WithString("folder",
+				mcp.Description("Folder to browse: well-known name (inbox), path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID. Omit for the top level."),
+			),
+			mcp.WithBoolean("recursive",
+				mcp.Description("Descend into subfolders (default false = one level)."),
+			),
+			mcp.WithNumber("max_depth",
+				mcp.Description("Levels to return when recursive=true, counting the requested level (default 3, max 10)."),
+				mcp.Min(1),
+				mcp.Max(10),
 			),
 			mcp.WithNumber("max_results",
-				mcp.Description("Maximum number of folders to return (default 25)."),
+				mcp.Description("Maximum folders per level (default 100, max 1000); truncation is reported."),
 				mcp.Min(1),
+				mcp.Max(1000),
+			),
+			mcp.WithString("account",
+				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
 			),
 			mcp.WithString("output",
 				mcp.Description("Output mode: 'text' (default), 'summary', or 'raw'."),
@@ -611,90 +644,15 @@ func buildDeleteDraftVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fun
 	}
 }
 
-// buildListChildFoldersVerb constructs the list_child_folders Verb (MailManageEnabled-gated).
-func buildListChildFoldersVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
-	return tools.Verb{
-		Name:        "list_child_folders",
-		Summary:     "list immediate child folders of a given parent folder",
-		Description: "Returns the immediate child folders of a specified parent mail folder with display name, unread count, and total count. Use the returned folder IDs with list_messages to scope queries or with list_child_folders to descend further. For a full recursive hierarchy, use list_folder_tree instead. Requires MAIL_MANAGE_ENABLED=true.",
-		Examples: []tools.Example{
-			{Args: map[string]any{"folder_id": "AAMkAG..."}, Comment: "list child folders of a specific folder"},
-		},
-		SeeDocs: []string{"concepts#mail-gating"},
-		Handler: wrap("mail.list_child_folders", "read", tools.NewHandleListChildFolders(rc, c.timeout)),
-		Annotations: []mcp.ToolOption{
-			mcp.WithReadOnlyHintAnnotation(true),
-			mcp.WithDestructiveHintAnnotation(false),
-			mcp.WithIdempotentHintAnnotation(true),
-			mcp.WithOpenWorldHintAnnotation(true),
-		},
-		Schema: []mcp.ToolOption{
-			mcp.WithString("folder_id",
-				mcp.Required(),
-				mcp.Description("The unique identifier of the parent folder whose children to list."),
-			),
-			mcp.WithString("account",
-				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
-			),
-			mcp.WithNumber("max_results",
-				mcp.Description("Maximum number of child folders to return (default 25)."),
-				mcp.Min(1),
-			),
-			mcp.WithString("output",
-				mcp.Description("Output mode: 'text' (default), 'summary', or 'raw'."),
-				mcp.Enum("text", "summary", "raw"),
-			),
-		},
-	}
-}
-
-// buildListFolderTreeVerb constructs the list_folder_tree Verb (MailManageEnabled-gated).
-func buildListFolderTreeVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
-	return tools.Verb{
-		Name:        "list_folder_tree",
-		Summary:     "recursively list the full folder hierarchy with tree structure",
-		Description: "Recursively lists the folder hierarchy starting from a given root folder or all top-level folders. Each level fetches child folders from the Graph API, descending up to max_depth levels. Use this to discover nested folder structures. Be mindful that deep hierarchies generate multiple Graph API calls. Requires MAIL_MANAGE_ENABLED=true.",
-		Examples: []tools.Example{
-			{Args: map[string]any{}, Comment: "list full folder tree from top level"},
-			{Args: map[string]any{"folder_id": "AAMkAG...", "max_depth": 2}, Comment: "list 2 levels deep from a specific folder"},
-		},
-		SeeDocs: []string{"concepts#mail-gating"},
-		Handler: wrap("mail.list_folder_tree", "read", tools.NewHandleListFolderTree(rc, c.timeout)),
-		Annotations: []mcp.ToolOption{
-			mcp.WithReadOnlyHintAnnotation(true),
-			mcp.WithDestructiveHintAnnotation(false),
-			mcp.WithIdempotentHintAnnotation(true),
-			mcp.WithOpenWorldHintAnnotation(true),
-		},
-		Schema: []mcp.ToolOption{
-			mcp.WithString("folder_id",
-				mcp.Description("Root folder ID to start from. Omit to list all top-level folders and their descendants."),
-			),
-			mcp.WithNumber("max_depth",
-				mcp.Description("Maximum depth to recurse (default 3, max 10)."),
-				mcp.Min(1),
-				mcp.Max(10),
-			),
-			mcp.WithString("account",
-				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
-			),
-			mcp.WithString("output",
-				mcp.Description("Output mode: 'text' (default), 'summary', or 'raw'."),
-				mcp.Enum("text", "summary", "raw"),
-			),
-		},
-	}
-}
-
 // buildCreateFolderVerb constructs the create_folder Verb (MailManageEnabled-gated).
 func buildCreateFolderVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
 	return tools.Verb{
 		Name:        "create_folder",
 		Summary:     "create a mail folder, optionally nested under a parent",
-		Description: "Creates a new mail folder. When parent_folder_id is provided, the folder is created as a child of that parent; otherwise it is created at the top level. Requires MAIL_MANAGE_ENABLED=true.",
+		Description: "Creates a new mail folder. When `parent` is provided the folder is created inside it; otherwise it is created at the top level. `parent` accepts a well-known name (\"inbox\"), a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID. parent_folder_id is accepted as a legacy alias. Requires MAIL_MANAGE_ENABLED=true.",
 		Examples: []tools.Example{
 			{Args: map[string]any{"display_name": "Projects"}, Comment: "create a top-level folder"},
-			{Args: map[string]any{"display_name": "Swedfund", "parent_folder_id": "AAMkAG..."}, Comment: "create a nested folder"},
+			{Args: map[string]any{"display_name": "Swedfund", "parent": "Inbox/01 Projects"}, Comment: "create a nested folder addressed by path"},
 		},
 		SeeDocs: []string{"concepts#mail-gating"},
 		Handler: wrapWrite("mail.create_folder", "write", tools.NewHandleCreateFolder(rc, c.timeout)),
@@ -709,8 +667,11 @@ func buildCreateFolderVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 				mcp.Required(),
 				mcp.Description("Display name for the new folder."),
 			),
+			mcp.WithString("parent",
+				mcp.Description("Parent folder: well-known name, path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID. Omit for the top level."),
+			),
 			mcp.WithString("parent_folder_id",
-				mcp.Description("Parent folder ID. Omit to create at the top level."),
+				mcp.Description("Legacy alias for `parent`. Prefer `parent`."),
 			),
 			mcp.WithString("account",
 				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
@@ -724,9 +685,12 @@ func buildDeleteFolderVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 	return tools.Verb{
 		Name:        "delete_folder",
 		Summary:     "permanently delete a mail folder and all its contents (irreversible)",
-		Description: "Permanently deletes a mail folder and all messages and child folders it contains. This operation is irreversible. Well-known folders (Inbox, Sent Items, Drafts) cannot be deleted; the Graph API rejects such requests with HTTP 400. Requires MAIL_MANAGE_ENABLED=true.",
-		SeeDocs:     []string{"concepts#mail-gating"},
-		Handler:     wrapWrite("mail.delete_folder", "delete", tools.NewHandleDeleteFolder(rc, c.timeout)),
+		Description: "Permanently deletes a mail folder and all messages and child folders it contains. This operation is irreversible. `folder` accepts a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, a well-known name, or a Graph folder ID; folder_id is accepted as a legacy alias. Well-known folders (Inbox, Sent Items, Drafts) cannot be deleted; the Graph API rejects such requests with HTTP 400. Requires MAIL_MANAGE_ENABLED=true.",
+		Examples: []tools.Example{
+			{Args: map[string]any{"folder": "Inbox/01 Projects/Obsolete"}, Comment: "delete a nested folder addressed by path"},
+		},
+		SeeDocs: []string{"concepts#mail-gating"},
+		Handler: wrapWrite("mail.delete_folder", "delete", tools.NewHandleDeleteFolder(rc, c.timeout)),
 		Annotations: []mcp.ToolOption{
 			mcp.WithReadOnlyHintAnnotation(false),
 			mcp.WithDestructiveHintAnnotation(true),
@@ -734,9 +698,9 @@ func buildDeleteFolderVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 			mcp.WithOpenWorldHintAnnotation(true),
 		},
 		Schema: []mcp.ToolOption{
-			mcp.WithString("folder_id",
+			mcp.WithString("folder",
 				mcp.Required(),
-				mcp.Description("The unique identifier of the folder to delete."),
+				mcp.Description("Folder to delete: path (\"Inbox/01 Projects\"), top-level name, well-known name, or Graph folder ID."),
 			),
 			mcp.WithString("account",
 				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
@@ -750,9 +714,10 @@ func buildMoveMessageVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fun
 	return tools.Verb{
 		Name:        "move_message",
 		Summary:     "move a single message to a different folder",
-		Description: "Moves a single mail message to a destination folder. The Graph API creates a new copy of the message in the destination folder and returns the new message ID; the original ID becomes invalid. Requires MAIL_MANAGE_ENABLED=true.",
+		Description: "Moves a single mail message to a destination folder. `destination` accepts a well-known name (\"archive\"), a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID; destination_folder_id is accepted as a legacy alias. The Graph API creates a new copy of the message in the destination folder and returns the new message ID; the original ID becomes invalid. Requires MAIL_MANAGE_ENABLED=true.",
 		Examples: []tools.Example{
-			{Args: map[string]any{"message_id": "AAMkAG...", "destination_folder_id": "AAMkAG..."}, Comment: "move a message to a specific folder"},
+			{Args: map[string]any{"message_id": "AAMkAG...", "destination": "Archive"}, Comment: "archive a message by folder name"},
+			{Args: map[string]any{"message_id": "AAMkAG...", "destination": "Inbox/01 Projects/Swedfund"}, Comment: "file a message into a nested folder by path"},
 		},
 		SeeDocs: []string{"concepts#mail-gating"},
 		Handler: wrapWrite("mail.move_message", "write", tools.NewHandleMoveMessage(rc, c.timeout)),
@@ -767,9 +732,12 @@ func buildMoveMessageVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fun
 				mcp.Required(),
 				mcp.Description("The unique identifier of the message to move."),
 			),
-			mcp.WithString("destination_folder_id",
+			mcp.WithString("destination",
 				mcp.Required(),
-				mcp.Description("The unique identifier of the destination folder."),
+				mcp.Description("Destination folder: well-known name, path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID."),
+			),
+			mcp.WithString("destination_folder_id",
+				mcp.Description("Legacy alias for `destination`. Prefer `destination`."),
 			),
 			mcp.WithString("account",
 				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
@@ -783,9 +751,9 @@ func buildMoveMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 	return tools.Verb{
 		Name:        "move_messages",
 		Summary:     "move multiple messages to a destination folder in batch",
-		Description: "Moves multiple mail messages to a destination folder. Each message is moved individually; failures do not abort remaining moves. The output reports per-message success or failure. Accepts up to 50 comma-separated message IDs. Requires MAIL_MANAGE_ENABLED=true.",
+		Description: "Moves multiple mail messages to a destination folder. `destination` is resolved once for the batch and accepts a well-known name, a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID; destination_folder_id is accepted as a legacy alias. Each message is moved individually; failures do not abort remaining moves. The output reports per-message success or failure. Accepts up to 50 comma-separated message IDs. Requires MAIL_MANAGE_ENABLED=true.",
 		Examples: []tools.Example{
-			{Args: map[string]any{"message_ids": "AAMkAG...,AAMkAG...", "destination_folder_id": "AAMkAG..."}, Comment: "move multiple messages to a folder"},
+			{Args: map[string]any{"message_ids": "AAMkAG...,AAMkAG...", "destination": "Archive"}, Comment: "archive several messages at once"},
 		},
 		SeeDocs: []string{"concepts#mail-gating"},
 		Handler: wrapWrite("mail.move_messages", "write", tools.NewHandleMoveMessages(rc, c.timeout)),
@@ -800,9 +768,9 @@ func buildMoveMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrapWrite fu
 				mcp.Required(),
 				mcp.Description("Comma-separated list of message IDs to move (max 50)."),
 			),
-			mcp.WithString("destination_folder_id",
+			mcp.WithString("destination",
 				mcp.Required(),
-				mcp.Description("The unique identifier of the destination folder."),
+				mcp.Description("Destination folder: well-known name, path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID."),
 			),
 			mcp.WithString("account",
 				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),

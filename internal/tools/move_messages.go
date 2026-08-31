@@ -38,14 +38,25 @@ const maxBatchMoveMessages = 50
 //
 // Returns a handler function compatible with the MCP server's verb dispatch.
 //
+// The destination is given as the natural-language `destination` reference —
+// a well-known name, a display-name path such as "Inbox/01 Projects", a
+// top-level folder name, or a raw Graph id — resolved once by ResolveFolderRef
+// before the batch starts. The legacy spelling destination_folder_id is still
+// accepted.
+//
 // The handler:
-//   - Validates message_ids (comma-separated, max 50) and
-//     destination_folder_id.
+//   - Validates message_ids (comma-separated, max 50) and `destination`.
+//   - Resolves `destination` to a folder id once for the whole batch.
 //   - Iterates over each message ID, calling the move endpoint.
 //   - Collects per-message results (success with new ID, or failure reason).
 //   - Returns a text summary of all outcomes.
 //
-// Side effects: calls POST /me/messages/{id}/move on the Microsoft Graph API
+// Errors: returns a tool error when no account is selected, when either
+// required parameter is missing or malformed, when `destination` cannot be
+// resolved, or when every individual move failed.
+//
+// Side effects: resolves `destination` (which may issue folder lookup
+// requests) and calls POST /me/messages/{id}/move on the Microsoft Graph API
 // for each message ID. Failed moves do not prevent subsequent messages from
 // being processed.
 func NewHandleMoveMessages(retryCfg graph.RetryConfig, timeout time.Duration) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -65,11 +76,11 @@ func NewHandleMoveMessages(retryCfg graph.RetryConfig, timeout time.Duration) fu
 			return mcp.NewToolResultError("missing required parameter: message_ids"), nil
 		}
 
-		destFolderID, err := request.RequireString("destination_folder_id")
-		if err != nil {
-			return mcp.NewToolResultError("missing required parameter: destination_folder_id"), nil
+		destRef := firstStringParam(request, "destination", "destination_folder_id")
+		if destRef == "" {
+			return mcp.NewToolResultError("missing required parameter: destination"), nil
 		}
-		if err := validate.ValidateResourceID(destFolderID, "destination_folder_id"); err != nil {
+		if err := validate.ValidateResourceID(destRef, "destination"); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
@@ -87,6 +98,11 @@ func NewHandleMoveMessages(retryCfg graph.RetryConfig, timeout time.Duration) fu
 			if err := validate.ValidateResourceID(id, "message_ids"); err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
+		}
+
+		destFolderID, err := ResolveFolderRef(ctx, client, retryCfg, timeout, destRef)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		logger.DebugContext(ctx, "batch move started",
@@ -138,7 +154,7 @@ func NewHandleMoveMessages(retryCfg graph.RetryConfig, timeout time.Duration) fu
 			"duration", time.Since(start))
 
 		summary := fmt.Sprintf("Moved %d of %d message(s) to folder %s.\n\n%s",
-			succeeded, len(messageIDs), destFolderID, b.String())
+			succeeded, len(messageIDs), destRef, b.String())
 		if line := AccountInfoLine(ctx); line != "" {
 			summary += "\n" + line
 		}

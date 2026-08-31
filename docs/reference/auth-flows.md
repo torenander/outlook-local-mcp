@@ -1,171 +1,205 @@
 # Authentication Flows
 
-Reference documentation for device code flow, OAuth scopes, token caching, and the Graph client initialization sequence. For a user-facing overview of authentication concepts, see [docs/concepts.md](../concepts.md).
+Contributor reference for the three authentication methods, the middleware state machine that drives them, and the token stores behind them. For the user-facing overview see [docs/concepts.md](../concepts.md); for failure modes see [docs/troubleshooting.md](../troubleshooting.md).
+
+Code: `internal/auth/` (`auth.go`, `authcode.go`, `middleware.go`, `silent.go`, `pending.go`, `account_slot.go`, `recovery_ops.go`, `devicecode_prompt.go`, `devicecode_present.go`), `internal/config/config.go` (`InferAuthMethod`).
 
 ---
 
-## Authentication: device code flow without app registration
+## The client ID choice
 
-### The critical client ID choice
+The server defaults to the **Microsoft Office** first-party client ID **`d3590ed6-52b3-4102-aeff-aad2292ab01c`** (friendly name `outlook-desktop`). It is the only well-known client ID confirmed to have `Calendars.Read` and `Calendars.ReadWrite` pre-authorized for Microsoft Graph (`00000003-0000-0000-c000-000000000000`). The Azure CLI client ID (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) does **not** support calendar scopes and fails with `AADSTS65002`.
 
-The server uses the **Microsoft Office** first-party client ID: **`d3590ed6-52b3-4102-aeff-aad2292ab01c`**. This is the only well-known client ID confirmed to have `Calendars.Read` and `Calendars.ReadWrite` pre-authorized for the Microsoft Graph resource (`00000003-0000-0000-c000-000000000000`). The Azure CLI client ID (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) explicitly does **not** support calendar scopes and will fail with `AADSTS65002` ("consent between first party application and first party resource must be configured via preauthorization").
+This choice constrains which flows can work:
 
-The Microsoft Office client ID is present in every Entra ID / Entra ID tenant by default. It supports device code flow and is pre-authorized for a broad set of Microsoft Graph delegated permissions including `Calendar.ReadWrite`, `Calendars.Read.Shared`, `Calendars.ReadWrite`, `Mail.ReadWrite`, `Files.Read`, `Contacts.ReadWrite`, `User.Read.All`, `People.Read`, and others.
+| Redirect URI | Registered on the MS Office app? | Consequence |
+|---|---|---|
+| `http://localhost:<port>` | No | The `browser` flow fails with `AADSTS50011` |
+| `https://login.microsoftonline.com/common/oauth2/nativeclient` | Yes | The `auth_code` flow works |
+| *(none — device code grant)* | n/a | The `device_code` flow works, subject to Conditional Access |
+
+Full analysis in [CR-0030](../cr/CR-0030-manual-auth-code-flow.md).
 
 ### Tenant ID configuration
 
 | Value | Supported accounts | Recommendation |
 |---|---|---|
-| `"common"` | Work/school + personal Microsoft accounts | **Use this as default**, broadest compatibility |
+| `"common"` | Work/school + personal Microsoft accounts | **Default**, broadest compatibility |
 | `"organizations"` | Work/school accounts only | Use if personal accounts should be excluded |
 | `"consumers"` | Personal Microsoft accounts only (Outlook.com) | Use for personal-only scenarios |
 | `"<tenant-guid>"` | Single specific tenant | Use for enterprise lockdown |
 
-The specification defaults to `"common"` but allows override via configuration.
+---
 
-### OAuth scopes
+## Method selection
 
-Request the delegated scope **`Calendars.ReadWrite`** by default. This is the least-privileged delegated permission that grants full read and write access to all calendar event properties including body, subject, location, attendees, and the ability to create, update, delete, and cancel events. `Calendars.Read` would be insufficient because it does not permit write operations. `Calendars.ReadBasic` is even more limited and omits body content entirely. The `offline_access` scope is automatically included by the Azure Identity library to obtain a refresh token.
+`config.InferAuthMethod(clientID, explicitAuthMethod)` returns the effective method and the source that decided it. `Config.AuthMethodSource` records the source for `system.status`.
 
-When mail access is enabled via `OUTLOOK_MCP_MAIL_ENABLED=true`, the **`Mail.Read`** scope is additionally requested, granting read-only access to the user's mailbox. This scope is not requested when mail is disabled (the default). See CR-0043 for details on the opt-in mail feature.
+| Condition | Method | Source |
+|---|---|---|
+| `OUTLOOK_MCP_AUTH_METHOD` set | that value | `explicit` |
+| Client ID is in `config.WellKnownClientIDs` | `auth_code` | `inferred` |
+| Anything else (custom app registration) | `browser` | `default` |
 
-The `Calendars.ReadWrite` scope is a delegated permission that **does not require admin consent**; users can self-consent. It covers all write operations including creating events with attendees (which automatically sends invitations), cancelling events (which sends cancellation notices), and enabling Teams online meetings via the `isOnlineMeeting` flag. No `Mail.Send` or `OnlineMeetings.ReadWrite` scope is needed.
+The inferred value was `device_code` until CR-0067. It changed because device code cannot be completed in band: it needs a human to read a code and approve it on a separate page, which stalls unattended sessions. `auth_code` returns a value (the redirect URL) that the user can paste back through the same conversation. `device_code` remains fully supported and is selected by setting the environment variable explicitly.
 
-When calling `msgraphsdk.NewGraphServiceClientWithCredentials`, pass scopes from `auth.Scopes(cfg)`, which returns `[]string{"Calendars.ReadWrite"}` when mail is disabled, or `[]string{"Calendars.ReadWrite", "Mail.Read"}` when mail is enabled. The SDK automatically prefixes the Graph resource URI.
-
-### Device code flow sequence
-
-1. The server calls `azidentity.NewDeviceCodeCredential(options)` at startup.
-2. On first authentication (no cached token), the credential's `GetToken()` method posts to `https://login.microsoftonline.com/common/oauth2/v2.0/devicecode` with the client ID and scope.
-3. Microsoft returns a `user_code` and `verification_uri` (`https://microsoft.com/devicelogin`).
-4. The `UserPrompt` callback fires. The server prints the message to **stderr** (not stdout, which is reserved for MCP JSON-RPC). The message reads something like: *"To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD1234 to authenticate."*
-5. The library polls `https://login.microsoftonline.com/common/oauth2/v2.0/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code` until the user completes sign-in or the code expires (~15 minutes).
-6. On success, the credential receives `access_token`, `refresh_token`, `id_token`, and caches them.
-7. Subsequent `GetToken()` calls return the cached access token or silently refresh using the refresh token, with no user interaction required.
-
-### azidentity credential construction
-
-```go
-const (
-    microsoftOfficeClientID = "d3590ed6-52b3-4102-aeff-aad2292ab01c"
-    defaultTenantID         = "common"
-)
-
-cred, err := azidentity.NewDeviceCodeCredential(&azidentity.DeviceCodeCredentialOptions{
-    ClientID:             microsoftOfficeClientID,
-    TenantID:             defaultTenantID,
-    Cache:                persistentCache,          // from azidentity/cache
-    AuthenticationRecord: loadedAuthRecord,          // from disk, zero-value on first run
-    UserPrompt: func(ctx context.Context, msg azidentity.DeviceCodeMessage) error {
-        fmt.Fprintf(os.Stderr, "\n%s\n\n", msg.Message)
-        slog.Info("device code message displayed to user")
-        return nil
-    },
-})
-```
-
-**`DeviceCodeCredentialOptions` fields used:**
-
-| Field | Type | Value | Purpose |
-|---|---|---|---|
-| `ClientID` | `string` | `"d3590ed6-52b3-4102-aeff-aad2292ab01c"` | Microsoft Office first-party app |
-| `TenantID` | `string` | `"common"` (configurable) | Multi-tenant support |
-| `Cache` | `azidentity.Cache` | From `cache.New()` | Persistent OS-level token cache |
-| `AuthenticationRecord` | `azidentity.AuthenticationRecord` | Loaded from JSON file | Identifies cached account |
-| `UserPrompt` | `func(context.Context, DeviceCodeMessage) error` | Print to stderr | Shows device code to user |
+Per-account methods override the server default. `AccountEntry.AuthMethod` is persisted in `accounts.json` and is authoritative for that account; `auth.inferAuthMethod(entry)` falls back to inspecting the credential type only when the field is empty.
 
 ---
 
-## Token caching and persistence
+## Credential types
 
-Token caching is critical so users authenticate only once. The implementation uses two complementary mechanisms:
+| Method | Type | Interactive entry point | `GetToken` behaviour on cache miss |
+|---|---|---|---|
+| `auth_code` | `auth.AuthCodeCredential` (wraps MSAL Go `public.Client`) | `AuthCodeURL` + `ExchangeCode` | Returns `authentication required`; **never** escalates |
+| `browser` | `azidentity.InteractiveBrowserCredential` | `Authenticate` | Returns `AuthenticationRequiredError` — see below |
+| `device_code` | `azidentity.DeviceCodeCredential` | `Authenticate` | Returns `AuthenticationRequiredError` — see below |
 
-### 1. Persistent token cache (`azidentity/cache`)
+By default the two azidentity credentials do **not** stop at the cache: `publicClient.GetToken` tries `AcquireTokenSilent` and then falls through to `reqToken`, which opens a browser window for `InteractiveBrowserCredential` and emits a fresh device code for `DeviceCodeCredential` (`public_client.go:135-156`). Because the Graph SDK's bearer-token policy calls `GetToken` on every request, that default would let an expired token pop a browser in the middle of an unrelated tool call.
 
-The `github.com/Azure/azure-sdk-for-go/sdk/azidentity/cache` package stores encrypted tokens in OS-native secure storage: macOS Keychain, Linux libsecret (GNOME Keyring), or Windows DPAPI.
+`setupBrowserCredential` and `setupDeviceCodeCredential` therefore both set **`DisableAutomaticAuthentication: true`** (declared on `InteractiveBrowserCredentialOptions:44-47` and `DeviceCodeCredentialOptions:45-48`). `GetToken` then returns `azidentity.AuthenticationRequiredError` on a miss, which `IsAuthError` recognises — its message begins with the credential name, already an `authErrorPatterns` entry — so the failure routes into `AuthMiddleware` and becomes a coordinated prompt.
 
-```go
-import "github.com/Azure/azure-sdk-for-go/sdk/azidentity/cache"
+`Authenticate()` is unaffected: it calls `reqToken` directly and never reads the option (`public_client.go:110-133`; the comment at `:159` notes `reqToken` is "separate from GetToken() to enable Authenticate() to bypass the cache"). The deliberate interactive flows still prompt exactly as before.
 
-c, err := cache.New(&cache.Options{Name: "outlook-local-mcp"})
-if err != nil {
-    slog.Warn("persistent token cache unavailable, using in-memory cache", "error", err)
-    c = nil  // nil Cache means in-memory only
-} else {
-    slog.Info("persistent token cache initialized", "cache_name", "outlook-local-mcp")
-}
+---
+
+## Lazy authentication
+
+Authentication is **not** performed at startup. `SetupCredential` constructs a credential and returns; the first tool call drives whatever flow is needed. This was introduced by CR-0022 and replaced an earlier design that blocked in `main` until the user signed in.
+
+`main.go` does perform a startup *probe* (`probeStartupToken`): a bounded silent `GetToken` that, on success, calls `markPreAuthenticated` so the middleware knows the credential is warm. It runs for every method. Before CR-0067 it was skipped for `device_code`, because a cache miss there would have emitted a device code nobody asked for, and readiness was guessed at from the presence of an auth record file; now that every credential is silent-only the probe asks the credential directly.
+
+---
+
+## Middleware state machine
+
+`auth.AuthMiddleware` wraps every calendar, mail, account and `system.complete_auth` verb. Per call:
+
+```mermaid
+flowchart TD
+    A[tool call] --> B[install account slot in context]
+    B --> C{background auth pending?}
+    C -->|running, account verb| H[run handler]
+    C -->|running, other verb| D[return still-in-progress]
+    C -->|finished with error| E[return formatted auth error]
+    C -->|finished ok| F
+    C -->|none| F{credential warm?}
+    F -->|no, account verb| H
+    F -->|no| G[try silent token]
+    G -->|success| H
+    G -->|failure| I[handleAuthError]
+    F -->|yes| H
+    H --> J{auth error in result?}
+    J -->|no| K[return result]
+    J -->|yes| I
+    I --> L[resolve account from slot]
+    L --> M[try silent token]
+    M -->|success| N[retry handler]
+    M -->|failure| O[dispatch interactive flow by method]
 ```
 
-### 2. Authentication record file
+Key properties, all introduced or corrected by CR-0067:
 
-`azidentity.AuthenticationRecord` is a non-secret JSON-serializable struct containing metadata (account ID, tenant, authority) that tells the credential which cached token to look up. It contains **no tokens** and is safe to store on disk.
+- **Silent before interactive.** `auth.TrySilentToken` runs before any user-visible flow, both on the fresh-credential fast path and inside `handleAuthError`, for all three methods. Eligibility is decided by `silentOnlyAcquirer`, which allows `*AuthCodeCredential` (it declares `SilentOnly()`, being silent-only by construction) plus the two azidentity types this package builds with `DisableAutomaticAuthentication`. Anything else is skipped, so a credential type added later without the flag fails safe instead of prompting. `TestSetupCredential_GetTokenIsSilentOnly` pins the invariant behaviourally, since the SDK keeps the option in an unexported field.
+- **Recovery verbs are never gated.** `isRecoveryOperation` matches calls to the `account` aggregate tool. Those verbs bypass both the "still in progress" response and the fresh-credential fast path, so `account.list` and `account.login` work even when nothing else does.
+- **Pending state is race free.** A background attempt is a `pendingAuthAttempt` published through an `atomic.Pointer`. Its `err` field is written once and then `done` is closed, so a reader that has observed the close sees the final value without a lock. The completing goroutine cannot take `authMiddlewareState.mu` — `handleAuthError` holds it while waiting — which is why the previous field-based design raced.
+- **Pending state self-clears.** Both the browser and device code background contexts are bounded at `backgroundAuthTimeout` (300s); both previously ran on an unbounded `context.Background()`. An abandoned sign-in releases the pending flag instead of freezing the process.
 
-**File path:** `~/.outlook-local-mcp/auth_record.json` (configurable). File permissions: `0600`.
+### Per-account re-authentication
 
-**Load pattern:**
-```go
-func loadAuthRecord(path string) azidentity.AuthenticationRecord {
-    var record azidentity.AuthenticationRecord
-    data, err := os.ReadFile(path)
-    if err != nil {
-        slog.Info("no authentication record found, device code flow required", "path", path)
-        return record // zero-value, triggers fresh auth
-    }
-    if err := json.Unmarshal(data, &record); err != nil {
-        slog.Warn("corrupt authentication record, will re-authenticate", "path", path, "error", err)
-        return azidentity.AuthenticationRecord{}
-    }
-    slog.Info("authentication record loaded", "path", path)
-    return record
-}
+`AuthMiddleware` wraps `AccountResolver`, not the reverse (see `internal/server/mail_verbs.go`). The resolver's `WithAccountAuth` therefore lands on a context derived *inside* the middleware call and cannot travel back out. `account_slot.go` closes the loop: the middleware installs a mutable `accountAuthSlot` pointer in the context before calling the chain, the resolver fills it in, and `handleAuthError` reads it through `resolvedAccountAuth`.
+
+One case remains unresolved by design: the fresh-credential fast path never calls the handler, so the resolver never runs and no account is recorded. Re-authentication there uses the server default credential.
+
+---
+
+## Flow: `auth_code`
+
+Synchronous, driven by `handleAuthCodeAuth`.
+
+```mermaid
+sequenceDiagram
+    participant MW as AuthMiddleware
+    participant Cred as AuthCodeCredential
+    participant Browser
+    participant AAD as Entra ID
+    participant Client as MCP client
+
+    MW->>Cred: AuthCodeURL(scopes)
+    Cred-->>MW: authorize URL with PKCE challenge
+    MW->>Browser: open URL
+    MW->>Client: form elicitation (redirect_url)
+    Browser->>AAD: sign in
+    AAD-->>Browser: redirect to nativeclient with code
+    alt elicitation supported
+        Client-->>MW: redirect URL
+    else not supported
+        MW-->>Client: tool text with auth URL
+        Client->>MW: system.complete_auth(redirect_url)
+    end
+    MW->>Cred: ExchangeCode(redirectURL, scopes)
+    Cred->>AAD: AcquireTokenByAuthCode (PKCE)
+    Cred->>Cred: PersistAccount(authRecordPath)
+    MW->>MW: retry original tool call
 ```
 
-**Save pattern (after first authentication):**
-```go
-func saveAuthRecord(path string, record azidentity.AuthenticationRecord) error {
-    data, err := json.Marshal(record)
-    if err != nil {
-        return err
-    }
-    os.MkdirAll(filepath.Dir(path), 0700)
-    if err := os.WriteFile(path, data, 0600); err != nil {
-        return err
-    }
-    slog.Info("authentication record saved", "path", path)
-    return nil
-}
-```
+`system.complete_auth` is registered unconditionally (CR-0067). When the target account is not running `auth_code`, `tools.completeAuthUnavailable` returns the recovery path that does apply rather than an internal type error.
 
-**First-run flow:** If no auth record exists, call `cred.Authenticate(ctx, nil)` explicitly to trigger device code flow and obtain the record, then save it. On subsequent runs, the record + persistent cache allow silent token acquisition with no user interaction.
+## Flow: `browser`
 
-```go
-if record == (azidentity.AuthenticationRecord{}) {
-    record, err = cred.Authenticate(context.Background(), nil)
-    if err != nil {
-        slog.Error("authentication failed", "error", err)
-        os.Exit(1)
-    }
-    slog.Info("authentication successful", "tenant", record.TenantID)
-    saveAuthRecord(authRecordPath, record)
-}
-```
+`handleBrowserAuth` announces the login page via URL elicitation (falling back to a log notification), then runs `Authenticate` in a background goroutine (bounded by `backgroundAuthTimeout`, 300s) while waiting up to `browserTimeout` (120s default) for it to finish. `InteractiveBrowserCredential` opens the system browser and listens on a localhost port. On success the original tool call is retried.
+
+## Flow: `device_code`
+
+`handleDeviceCodeAuth` starts `Authenticate` in a background goroutine with a `chan DeviceCodePrompt` in the context under `DeviceCodeMsgKey`. The credential's `UserPrompt` callback (`deviceCodeUserPrompt`) forwards the whole `azidentity.DeviceCodeMessage` — not just its rendered sentence — so the receiver can build a one-click URL.
+
+`presentDeviceCode` then:
+
+1. Composes `DeviceCodePrompt.OneClickURL()` — the verification URL with `?otc=<UserCode>`, which pre-fills the code box on the device login page.
+2. Requests a **URL mode** elicitation for that link.
+3. On acknowledgement, waits (bounded by `browserTimeout`) for the background attempt and retries the original tool call.
+4. On any elicitation error — including `ErrElicitationNotSupported` — returns `prompt.Message` **verbatim** as tool text. Per [CR-0031](../cr/CR-0031-elicitation-fallback.md), some clients answer elicitation with "Method not found" and this text is the only channel that reaches the user. It must not be reworded.
+
+---
+
+## OAuth scopes
+
+`auth.Scopes(cfg)` builds the requested scope set:
+
+| Configuration | Scopes |
+|---|---|
+| Default | `Calendars.ReadWrite` |
+| `OUTLOOK_MCP_MAIL_ENABLED=true` | `Calendars.ReadWrite`, `Mail.Read` |
+| `OUTLOOK_MCP_MAIL_MANAGE_ENABLED=true` | `Calendars.ReadWrite`, `Mail.ReadWrite` |
+
+`offline_access` is added automatically by the identity library. `Mail.Send` is never requested. `Calendars.ReadWrite` is a delegated permission that does not require admin consent and covers invitations, cancellations and Teams online meetings, so no `OnlineMeetings.ReadWrite` scope is needed.
+
+---
+
+## Token storage
+
+Three distinct stores are in play. Knowing which flow writes which one explains the one-time re-authentication after CR-0067.
+
+### 1. azidentity persistent cache
+
+`internal/auth/cache_cgo.go` / `cache_nocgo.go` initialise `azidentity/cache` with `Name: cfg.CacheName`. Tokens land in macOS Keychain, Linux libsecret, or Windows DPAPI. Used by the `browser` and `device_code` credentials. `OUTLOOK_MCP_TOKEN_STORAGE` (`auto`, `keychain`, `file`) selects the backend; the `file` backend is an AES-256-GCM encrypted file for headless hosts with no keyring.
+
+### 2. MSAL cache blob (`auth_code` only)
+
+`AuthCodeCredential` uses MSAL Go's own cache accessor via `InitMSALCache`, stored under `{cfg.CacheName}_msal.bin`. It is **separate** from store 1. A token cached by the `device_code` credential is therefore invisible to the `auth_code` credential and vice versa — which is why changing the inferred default costs exactly one interactive sign-in per account.
+
+### 3. Authentication record
+
+`azidentity.AuthenticationRecord` is non-secret metadata (account ID, tenant, authority) that tells a credential which cached token to look up. It contains no tokens. Written to `~/.outlook-local-mcp/auth_record.json` (`0600`), or `{label}_auth_record.json` per account in the same directory. `AuthCodeCredential.PersistAccount` writes the equivalent MSAL account metadata to the same path.
+
+`accounts.json` holds the registry: label, UPN, client ID, tenant ID and `auth_method` per account. It is written atomically and holds no secrets. An account's persisted `auth_method` is what it keeps on restart, regardless of what the server default later becomes.
 
 ---
 
 ## Graph client initialization
 
-After authentication, construct the Graph client using the convenience constructor:
-
 ```go
-graphClient, err := msgraphsdk.NewGraphServiceClientWithCredentials(
-    cred,
-    []string{"Calendars.ReadWrite"},
-)
-if err != nil {
-    slog.Error("graph client initialization failed", "error", err)
-    os.Exit(1)
-}
-slog.Info("graph client initialized", "scopes", []string{"Calendars.ReadWrite"})
+graphClient, err := msgraphsdk.NewGraphServiceClientWithCredentials(cred, auth.Scopes(cfg))
 ```
 
-This internally creates a `kiota-authentication-azure-go` auth provider and a `GraphRequestAdapter`. The `graphClient` is stored as a package-level `*msgraphsdk.GraphServiceClient` and shared across all tool handlers. Thread safety is guaranteed by the SDK.
+This creates a `kiota-authentication-azure-go` provider and a `GraphRequestAdapter` internally. Each account holds its own `*msgraphsdk.GraphServiceClient` in its `AccountEntry`; `AccountResolver` injects the right one into the request context via `WithGraphClient`. Thread safety is guaranteed by the SDK.

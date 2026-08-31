@@ -20,8 +20,7 @@ import (
 )
 
 // systemVerbsConfig holds the dependencies required to build the system domain
-// verb slice. All fields are captured at server start; Cred may be nil when
-// auth_code is not the active authentication method.
+// verb slice. All fields are captured at server start.
 type systemVerbsConfig struct {
 	// cfg is the full server configuration, passed to HandleStatus and
 	// HandleCompleteAuth.
@@ -44,8 +43,9 @@ type systemVerbsConfig struct {
 	// complete_auth verb.
 	authMW func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc
 
-	// cred is the default authenticator for the complete_auth verb. May be nil
-	// when auth_code is not the active auth method.
+	// cred is the default authenticator for the complete_auth verb. It only
+	// implements auth.AuthCodeFlow when the default account uses the auth_code
+	// method; the handler detects the mismatch and explains it.
 	cred auth.Authenticator
 }
 
@@ -54,8 +54,9 @@ type systemVerbsConfig struct {
 //
 // The "help" verb is always first. The "status" verb is always included and is
 // not wrapped with authMW because it reads only in-memory state. The
-// "complete_auth" verb is included and wrapped with authMW only when
-// cfg.AuthMethod == "auth_code".
+// "complete_auth" verb is also always included, wrapped with authMW, and
+// reports the applicable recovery path when the target account is not using
+// the auth_code method (CR-0067 A3).
 //
 // Each verb's Handler is pre-wrapped with observability and audit middleware
 // using the fully-qualified identity "system.<verb>" per CR-0060 FR-13 and
@@ -200,46 +201,53 @@ func buildSystemVerbs(c systemVerbsConfig) ([]tools.Verb, *tools.VerbRegistry) {
 		},
 	}
 
+	// complete_auth verb: always registered (CR-0067 A3). Gating registration
+	// on cfg.AuthMethod == "auth_code" removed the verb from the tool list at
+	// exactly the moment an agent mid-authentication needed it, and a
+	// per-account auth_method can differ from the server default anyway. The
+	// handler now answers a mismatched method with actionable guidance instead
+	// of the verb silently not existing.
+	innerHandler := audit.AuditWrap(
+		"system.complete_auth", "write",
+		tools.HandleCompleteAuth(c.cred, c.cfg.AuthRecordPath, c.registry, auth.Scopes(c.cfg), c.cfg.AuthMethod),
+	)
+	obsHandler := observability.WithObservability("system.complete_auth", c.m, c.tracer, innerHandler)
+	authedHandler := c.authMW(obsHandler)
+
+	completeAuthVerb := tools.Verb{
+		Name:        "complete_auth",
+		Summary:     "exchange browser redirect URL for tokens to finish auth_code sign-in",
+		Description: "Exchanges the browser redirect URL from the auth_code flow for OAuth tokens, completing the authentication handshake. Copy the full URL from the browser's address bar after signing in (it starts with https://login.microsoftonline.com/common/oauth2/nativeclient) and pass it as redirect_url. Always available; when the target account uses the browser or device_code method instead, the verb returns the recovery path that does apply rather than failing silently.",
+		Examples: []tools.Example{
+			{Args: map[string]any{"redirect_url": "https://login.microsoftonline.com/common/oauth2/nativeclient?code=0.Ab0A..."}, Comment: "finish sign-in for the default account"},
+			{Args: map[string]any{"redirect_url": "https://login.microsoftonline.com/common/oauth2/nativeclient?code=0.Ab0A...", "account": "work"}, Comment: "finish sign-in for a named account"},
+		},
+		SeeDocs: []string{"concepts#headless-and-non-interactive-authentication", "troubleshooting#auth-code-flow"},
+		Handler: tools.Handler(authedHandler),
+		Annotations: []mcp.ToolOption{
+			mcp.WithReadOnlyHintAnnotation(false),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(false),
+			mcp.WithOpenWorldHintAnnotation(true),
+		},
+		Schema: []mcp.ToolOption{
+			mcp.WithString("redirect_url",
+				mcp.Required(),
+				mcp.Description("The full URL from the browser's address bar after signing in."),
+			),
+			mcp.WithString("account",
+				mcp.Description("Account label or UPN that was provided to account_add when initiating auth_code authentication."),
+			),
+		},
+	}
+
 	verbs := []tools.Verb{
 		help.NewHelpVerb(registryPtr),
 		statusVerb,
+		completeAuthVerb,
 		listDocsVerb,
 		searchDocsVerb,
 		getDocsVerb,
-	}
-
-	// complete_auth verb: conditional on auth_code; requires authMW and network.
-	if c.cfg.AuthMethod == "auth_code" {
-		innerHandler := audit.AuditWrap(
-			"system.complete_auth", "write",
-			tools.HandleCompleteAuth(c.cred, c.cfg.AuthRecordPath, c.registry, auth.Scopes(c.cfg)),
-		)
-		obsHandler := observability.WithObservability("system.complete_auth", c.m, c.tracer, innerHandler)
-		authedHandler := c.authMW(obsHandler)
-
-		completeAuthVerb := tools.Verb{
-			Name:        "complete_auth",
-			Summary:     "exchange browser redirect URL for tokens to finish auth_code flow",
-			Description: "Exchanges the browser redirect URL from the auth_code flow for OAuth tokens, completing the authentication handshake. Only registered when AuthMethod=auth_code. Copy the full URL from the browser's address bar after signing in and pass it as redirect_url.",
-			SeeDocs:     []string{"concepts#headless-and-non-interactive-authentication"},
-			Handler:     tools.Handler(authedHandler),
-			Annotations: []mcp.ToolOption{
-				mcp.WithReadOnlyHintAnnotation(false),
-				mcp.WithDestructiveHintAnnotation(false),
-				mcp.WithIdempotentHintAnnotation(false),
-				mcp.WithOpenWorldHintAnnotation(true),
-			},
-			Schema: []mcp.ToolOption{
-				mcp.WithString("redirect_url",
-					mcp.Required(),
-					mcp.Description("The full URL from the browser's address bar after signing in."),
-				),
-				mcp.WithString("account",
-					mcp.Description("Account label or UPN that was provided to account_add when initiating auth_code authentication."),
-				),
-			},
-		}
-		verbs = append(verbs, completeAuthVerb)
 	}
 
 	return verbs, registryPtr
@@ -248,16 +256,15 @@ func buildSystemVerbs(c systemVerbsConfig) ([]tools.Verb, *tools.VerbRegistry) {
 // systemToolAnnotations returns the conservative aggregate MCP annotations for
 // the system domain tool per CR-0060 FR-9 and AC-9.
 //
-// readOnlyHint is false because the domain may host the write complete_auth
-// verb (when auth_code is active). destructiveHint is false because no verb
-// irreversibly deletes data. idempotentHint is false because complete_auth is
-// non-idempotent. openWorldHint is true because complete_auth calls Microsoft
-// Graph.
+// readOnlyHint is false because the domain hosts the write complete_auth verb.
+// destructiveHint is false because no verb irreversibly deletes data.
+// idempotentHint is false because complete_auth is non-idempotent.
+// openWorldHint is true because complete_auth calls Microsoft Graph.
 //
-// These values represent the most conservative annotation across all verbs that
-// may be registered for the domain. Even when complete_auth is absent (no
-// auth_code), the manifest-level annotation is fixed at construction time and
-// must remain consistent across deployment configurations.
+// These values represent the most conservative annotation across all verbs
+// registered for the domain. They were already computed as if complete_auth
+// were present, so making its registration unconditional in CR-0067 leaves the
+// aggregate annotation unchanged.
 func systemToolAnnotations() []mcp.ToolOption {
 	return []mcp.ToolOption{
 		mcp.WithTitleAnnotation("System"),

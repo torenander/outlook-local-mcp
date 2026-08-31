@@ -128,9 +128,9 @@ func TestFormatAuthError_IncludesTroubleshooting(t *testing.T) {
 
 	requiredSubstrings := []string{
 		"Authentication failed",
-		"account_list",
-		"account_add",
-		"retry your original request",
+		`operation="list"`,
+		`operation="login"`,
+		"Retry your original request",
 	}
 
 	for _, sub := range requiredSubstrings {
@@ -204,12 +204,12 @@ func TestFormatAuthError_IncludesRecoverySteps(t *testing.T) {
 
 	for _, err := range testErrors {
 		got := FormatAuthError(err)
-		if !strings.Contains(got, "account_list") {
-			t.Errorf("FormatAuthError(%q) missing recovery tool 'account_list' in output:\n%s",
+		if !strings.Contains(got, `operation="list"`) {
+			t.Errorf("FormatAuthError(%q) missing account list recovery step in output:\n%s",
 				err, got)
 		}
-		if !strings.Contains(got, "account_add") {
-			t.Errorf("FormatAuthError(%q) missing recovery tool 'add_account' in output:\n%s",
+		if !strings.Contains(got, `operation="login"`) {
+			t.Errorf("FormatAuthError(%q) missing account login recovery step in output:\n%s",
 				err, got)
 		}
 	}

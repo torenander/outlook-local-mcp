@@ -299,6 +299,15 @@ func (c *AuthCodeCredential) GetToken(ctx context.Context, options policy.TokenR
 	}, nil
 }
 
+// SilentOnly marks *AuthCodeCredential as satisfying SilentTokenCredential:
+// its GetToken calls MSAL AcquireTokenSilent and returns an "authentication
+// required" error when the cache misses, so it can never escalate to an
+// interactive flow on its own. The auth middleware relies on this promise to
+// attempt a cache refresh before starting any user-visible flow (CR-0067 A1).
+//
+// SilentOnly has no behaviour and no side effects.
+func (c *AuthCodeCredential) SilentOnly() {}
+
 // Authenticate is provided for compatibility with the Authenticator interface
 // used by the AuthMiddleware. For the auth_code method, actual authentication
 // is driven by the AuthCodeFlow interface (AuthCodeURL + ExchangeCode) rather

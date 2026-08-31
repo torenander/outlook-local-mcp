@@ -175,9 +175,10 @@ type Config struct {
 
 	// AuthMethodSource indicates how the AuthMethod value was determined.
 	// "explicit" means the user set OUTLOOK_MCP_AUTH_METHOD; "inferred" means
-	// the method was determined from a well-known client ID in WellKnownClientIDs;
-	// "default" means the client ID did not match any well-known UUID and the
-	// fallback method ("browser") was used.
+	// the method was determined from a well-known client ID in
+	// WellKnownClientIDs (which yields "auth_code" per CR-0067); "default"
+	// means the client ID did not match any well-known UUID and the fallback
+	// method ("browser") was used.
 	AuthMethodSource string
 }
 
@@ -327,13 +328,25 @@ func LoadConfig() Config {
 // based on the resolved client ID and an explicitly provided auth method.
 //
 // When explicitAuthMethod is non-empty, it is returned as-is with source
-// "explicit" (the user's explicit choice always wins). When the client ID
-// matches a well-known UUID from the WellKnownClientIDs registry, "device_code"
-// is returned with source "inferred" because these apps support device code
-// flow without additional redirect URI configuration. When the client ID is a
-// custom value (not in the well-known registry), "browser" is returned with
-// source "default" because custom app registrations typically have
-// http://localhost redirect URIs configured.
+// "explicit" (the user's explicit choice always wins, including "device_code",
+// which remains fully supported).
+//
+// When the client ID matches a well-known UUID from the WellKnownClientIDs
+// registry, "auth_code" is returned with source "inferred" (CR-0067). The
+// well-known first-party app registrations (notably Microsoft Office,
+// d3590ed6-52b3-4102-aeff-aad2292ab01c) register the
+// https://login.microsoftonline.com/common/oauth2/nativeclient redirect URI
+// that the auth_code flow uses, but do NOT register http://localhost, so the
+// browser flow fails against them with AADSTS50011 (see CR-0030). Device code
+// was the previous inference, but it cannot be completed by an LLM agent on
+// the user's behalf: it requires a human to read a code and type it into a
+// separate page, which stalls every unattended session. The auth_code flow
+// can be completed in-band through MCP elicitation or the
+// system.complete_auth verb, so it is the friction-minimal default.
+//
+// When the client ID is a custom value (not in the well-known registry),
+// "browser" is returned with source "default" because custom app
+// registrations typically have http://localhost redirect URIs configured.
 //
 // Parameters:
 //   - clientID: the resolved (UUID) client ID from configuration.
@@ -348,7 +361,7 @@ func InferAuthMethod(clientID, explicitAuthMethod string) (string, string) {
 
 	for _, uuid := range WellKnownClientIDs {
 		if strings.EqualFold(clientID, uuid) {
-			return "device_code", "inferred"
+			return "auth_code", "inferred"
 		}
 	}
 

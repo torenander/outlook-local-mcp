@@ -31,7 +31,7 @@ Common failure modes and remediation steps for `outlook-local-mcp`.
 2. If the refresh fails, call `{tool: "account", args: {operation: "login", label: "<label>"}}` to initiate a new interactive authentication flow.
 3. After re-authenticating, the server persists a new token and automatically retries the pending tool call.
 
-**Prevention:** The server performs a silent token probe at startup. `device_code` accounts skip the probe to avoid crash loops; other methods probe silently and pre-cache tokens before the first tool call.
+**Prevention:** The server performs a silent token probe at startup for every authentication method, pre-caching tokens before the first tool call. Independently of that probe, the auth middleware retries a silent acquisition before every interactive flow it would otherwise start, so an expired access token backed by a live refresh credential is renewed without any prompt. Credentials are configured so that a cache miss reports an error rather than spontaneously opening a browser or emitting a device code mid-request.
 
 ---
 
@@ -39,13 +39,41 @@ Common failure modes and remediation steps for `outlook-local-mcp`.
 
 **Symptom:** Authentication returns a device code URL and code in the tool result text instead of completing automatically.
 
-**Cause:** The MCP client does not support the Elicitation API (e.g., Claude Code). The server falls back to returning the device code directly in the tool result.
+**Cause:** The MCP client does not support the Elicitation API (e.g., Claude Code). Where URL elicitation *is* supported the server presents a one-click link with the code already filled in (`https://microsoft.com/devicelogin?otc=<code>`); otherwise it falls back to returning the device code message from Entra ID verbatim in the tool result.
 
 **Remediation:**
 
 1. Copy the URL and code from the tool result.
 2. Open the URL in a browser, enter the code, and complete the Microsoft sign-in.
 3. After sign-in, call any tool again. The server picks up the cached token automatically.
+
+**Notes:**
+
+- `device_code` is fully supported but is no longer the inferred default; `auth_code` is. Select it explicitly with `OUTLOOK_MCP_AUTH_METHOD=device_code`.
+- A device code flow that is never completed no longer freezes the session. The background attempt is bounded at 300 seconds, after which the pending state clears by itself.
+- While a device code sign-in is outstanding, calendar and mail verbs report that authentication is in progress, but every `account` verb (`list`, `login`, `refresh`, ...) remains callable.
+- If your organisation blocks device code flow (`AADSTS50199`), switch to `auth_code`.
+
+---
+
+## Re-authentication after upgrading {#reauth-after-upgrade}
+
+**Symptom:** After upgrading the server, the first tool call asks you to sign in again even though nothing was signed out and the previous version had a working session.
+
+**Cause:** The default authentication method for well-known client IDs changed from `device_code` to `auth_code`. The two flows do not share a token store: the `azidentity` credentials used by `browser` and `device_code` keep tokens in the OS keychain entry named after `OUTLOOK_MCP_CACHE_NAME`, while the `auth_code` credential keeps its own MSAL cache blob in a separate `{cache-name}_msal.bin` entry. A token cached by the old default is therefore invisible to the new one.
+
+This is a **one-time** cost: exactly one interactive sign-in per account. After that, tokens renew silently as before.
+
+**Remediation:**
+
+1. Call `{tool: "account", args: {operation: "list"}}` to see which accounts are disconnected.
+2. For each one, call `{tool: "account", args: {operation: "login", label: "<label>"}}`.
+3. A browser opens. After signing in, copy the full URL from the address bar and either paste it into the elicitation prompt or pass it to `{tool: "system", args: {operation: "complete_auth", redirect_url: "<url>", account: "<label>"}}`.
+
+**Notes:**
+
+- Accounts already recorded in `accounts.json` keep the `auth_method` they were registered with. An account persisted as `device_code` continues to use device code until you remove and re-add it — the new default only applies where no method is recorded and none is set explicitly.
+- To avoid the re-authentication entirely, pin the previous behaviour with `OUTLOOK_MCP_AUTH_METHOD=device_code`.
 
 ---
 
@@ -58,8 +86,8 @@ Common failure modes and remediation steps for `outlook-local-mcp`.
 **Remediation:**
 
 1. Retry the tool call to trigger a fresh browser auth attempt.
-2. If the browser does not open automatically, use `auth_code` method instead: set `OUTLOOK_MCP_AUTH_METHOD=auth_code` and restart the server.
-3. For headless environments (containers, SSH), use `device_code` authentication: set `OUTLOOK_MCP_AUTH_METHOD=device_code`.
+2. If the browser does not open automatically, use the `auth_code` method instead: set `OUTLOOK_MCP_AUTH_METHOD=auth_code` and restart the server. This is also the default for well-known client IDs, which have no `http://localhost` redirect URI registered and fail the `browser` flow with `AADSTS50011`.
+3. For machines with no browser at all, use `device_code` authentication: set `OUTLOOK_MCP_AUTH_METHOD=device_code`.
 
 ---
 
@@ -71,9 +99,14 @@ Common failure modes and remediation steps for `outlook-local-mcp`.
 
 **Remediation:**
 
-1. Copy the full redirect URL from the browser address bar after sign-in.
+1. Copy the full redirect URL from the browser address bar after sign-in. It starts with `https://login.microsoftonline.com/common/oauth2/nativeclient`.
 2. If the MCP client supports Elicitation, paste it into the prompt.
-3. If not, call `{tool: "system", args: {operation: "complete_auth", redirect_url: "<url>"}}` to exchange the code for a token.
+3. If not, call `{tool: "system", args: {operation: "complete_auth", redirect_url: "<url>"}}` to exchange the code for a token. Add `account: "<label>"` when the sign-in was for a named account.
+
+**Notes:**
+
+- `system.complete_auth` is registered unconditionally. Calling it while the target account uses `browser` or `device_code` is not an error; the verb replies with the recovery path that does apply.
+- Authorization codes expire after roughly 10 minutes. If the exchange fails with an expired-code error, start the sign-in again with `{tool: "account", args: {operation: "login", label: "<label>"}}`.
 
 ---
 

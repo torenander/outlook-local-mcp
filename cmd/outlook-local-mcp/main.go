@@ -152,12 +152,9 @@ func main() {
 	// handler normally. If it fails, the auth middleware will handle
 	// re-authentication on the first tool call.
 	//
-	// For device_code credentials, the probe is skipped (would trigger
-	// interactive auth). Instead, if a persistent auth record exists on disk,
-	// we mark as pre-authenticated: the file-based token cache likely has
-	// valid tokens from a previous session, so the middleware should try the
-	// normal Graph API path first rather than the fresh-credential fast-path.
-	probeStartupToken(cred, cfg.AuthMethod, cfg.AuthRecordPath, markPreAuthenticated, scopes)
+	// Every credential this binary constructs is silent-only, so the probe is
+	// safe for all three auth methods including device_code (CR-0067 A1).
+	probeStartupToken(cred, cfg.AuthMethod, markPreAuthenticated, scopes)
 
 	// Step 8: Create MCP server with elicitation capability for multi-account
 	// account selection and interactive authentication prompts.
@@ -267,42 +264,27 @@ const startupProbeTimeout = 5 * time.Second
 // middleware that the credential is ready, preventing the fresh-credential
 // fast-path from triggering.
 //
-// Device code credentials are skipped because GetToken would trigger the
-// device code callback (interactive auth). Instead, the function checks
-// whether a persistent auth record exists on disk — if so, the user
-// authenticated in a previous session and the file-based token cache likely
-// contains valid tokens. In that case, markPreAuthenticated is called so the
-// middleware tries the normal Graph API path (which uses the cached token)
-// rather than the fresh-credential fast-path that skips straight to re-auth.
+// The probe runs for every authentication method, including device_code.
+// Before CR-0067 it was skipped there because GetToken would have fallen
+// through to the device code callback on a cache miss, emitting a code nobody
+// asked for; the function guessed at readiness with an os.Stat of the auth
+// record instead. All credentials this binary constructs are now silent-only
+// (auth.SetupCredential sets DisableAutomaticAuthentication on the azidentity
+// credentials), so the probe can ask the credential directly and
+// preAuthenticated reflects a real token check rather than the presence of a
+// file.
 //
 // Parameters:
 //   - cred: the default credential implementing azcore.TokenCredential.
-//   - authMethod: the configured auth method for the default account.
-//   - authRecordPath: path to the persistent auth record file on disk.
+//   - authMethod: the configured auth method for the default account, logged
+//     for diagnostics.
 //   - markPreAuthenticated: callback to signal the middleware that the
 //     credential has a valid cached token.
 //   - scopes: OAuth scopes to request for the token probe (from auth.Scopes(cfg)).
 //
-// Side effects: logs the probe result. Does not block startup on failure.
-func probeStartupToken(cred azcore.TokenCredential, authMethod, authRecordPath string, markPreAuthenticated func(), scopes []string) {
-	// Device code credentials trigger interactive auth on GetToken when no
-	// cached token exists. Skip the probe to avoid spurious output.
-	if authMethod == "device_code" {
-		// Check if a persistent auth record exists from a previous session.
-		// If so, the file-based token cache should have valid tokens and the
-		// middleware should try the normal path rather than fresh-credential.
-		if _, err := os.Stat(authRecordPath); err == nil {
-			markPreAuthenticated()
-			slog.Info("startup token probe skipped for device_code, auth record exists",
-				"auth_record", authRecordPath,
-				"reason", "file-based cache likely has valid tokens from previous session")
-			return
-		}
-		slog.Info("startup token probe skipped", "auth_method", "device_code",
-			"reason", "would trigger interactive device code flow, no prior auth record")
-		return
-	}
-
+// Side effects: logs the probe result. Never prompts the user. Does not block
+// startup on failure.
+func probeStartupToken(cred azcore.TokenCredential, authMethod string, markPreAuthenticated func(), scopes []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), startupProbeTimeout)
 	defer cancel()
 
@@ -311,10 +293,11 @@ func probeStartupToken(cred azcore.TokenCredential, authMethod, authRecordPath s
 	})
 	if err != nil {
 		slog.Info("startup token probe failed, re-authentication deferred to first tool call",
-			"error", err)
+			"auth_method", authMethod, "error", err)
 		return
 	}
 
 	markPreAuthenticated()
-	slog.Info("startup token probe succeeded, credential has valid cached token")
+	slog.Info("startup token probe succeeded, credential has valid cached token",
+		"auth_method", authMethod)
 }

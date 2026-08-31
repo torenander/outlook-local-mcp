@@ -44,6 +44,17 @@ The default account cannot be removed via `account.remove`.
 
 Multi-account features (account selection prompts, inline authentication during `account.add`) use the MCP Elicitation API. The server declares the `elicitation` capability at startup. MCP clients that support elicitation receive interactive prompts; clients that do not fall back to the default account for account selection and receive authentication feedback as tool result text.
 
+Two elicitation modes are used:
+
+- **Form mode** collects a value from the user. The `auth_code` flow uses it to ask for the redirect URL from the browser's address bar.
+- **URL mode** asks the user to open a link. The `browser` flow uses it to announce the login page, and the `device_code` flow uses it to present a one-click sign-in link with the code already filled in (`https://microsoft.com/devicelogin?otc=<code>`), so nothing has to be transcribed by hand.
+
+Elicitation is never required. Every flow has a plain-text fallback that is returned verbatim in the tool result, because some clients answer elicitation requests with "Method not found" and the tool result is then the only channel that reaches the user:
+
+- `auth_code` — the server returns the authorization URL and the caller finishes with `system.complete_auth`. That verb is always registered, whichever method is active, so it can never be missing at the moment it is needed.
+- `device_code` — the server returns the device code message from Entra ID unchanged.
+- `browser` — the server sends a log notification and opens the system browser directly.
+
 For `device_code` auth without elicitation, `account.add` uses a two-call pattern: the first call returns the device code and keeps the authentication goroutine alive in the background; the second call with the same label picks up the completed authentication and registers the account.
 
 ## Read-only mode
@@ -68,15 +79,19 @@ Mail access is disabled by default and enabled in two tiers via environment vari
 
 ## Headless and non-interactive authentication
 
-Authentication is lazy — deferred until the first tool call rather than blocking at startup. Three flows are available, controlled by `OUTLOOK_MCP_AUTH_METHOD`:
+Authentication is lazy — deferred until the first tool call rather than blocking at startup. Three flows are available, controlled by `OUTLOOK_MCP_AUTH_METHOD`. An explicit value always wins; when the variable is unset the method is inferred from the client ID.
 
-**`device_code`** (default for well-known client IDs) — the server obtains a device code from Entra ID and delivers it to the user. If MCP Elicitation is supported, the user sees the code in a prompt; otherwise it appears as tool result text. The tool returns immediately; calling any tool after the user completes sign-in in their browser picks up the cached token automatically. Works in all environments including headless and Docker.
+**`auth_code`** (default for well-known client IDs, including the shipped `outlook-desktop` default) — the system browser opens for OAuth login. After signing in, the browser lands on a blank page whose address bar holds the authorization code. The user hands that URL back through MCP Elicitation or the `system.complete_auth` verb, and the server exchanges it for tokens using PKCE. This is the default because it is the only flow that an assistant can drive to completion in one conversation: the redirect URL is a value the user can paste, so no out-of-band step blocks the session. It also works in headless and remote environments where no localhost port can be opened.
 
-**`browser`** (default for custom app registrations) — the system browser opens to the Microsoft login page and the server listens on a localhost port for the OAuth callback. Requires an app registration with `http://localhost` redirect URI.
+**`browser`** (default for custom app registrations) — the system browser opens to the Microsoft login page and the server listens on a localhost port for the OAuth callback. Requires an app registration with an `http://localhost` redirect URI, which the Microsoft first-party client IDs do not have — using it with them fails with `AADSTS50011`.
 
-**`auth_code`** — the system browser opens for OAuth login. The user pastes the redirect URL back via MCP Elicitation or the `system.complete_auth` verb. Uses PKCE for security. Suitable for headless or remote environments where a localhost port cannot be opened.
+**`device_code`** — the server obtains a device code from Entra ID and delivers it to the user, as a one-click link with the code pre-filled where the client supports URL elicitation, and as plain tool result text otherwise. Fully supported, and the right choice on machines with no browser at all; set `OUTLOOK_MCP_AUTH_METHOD=device_code` to select it. It is no longer the inferred default because completing it always requires a human to approve the code on a separate page, which stalls unattended sessions. Some organisations also block the flow outright via Conditional Access.
 
-On subsequent runs the server acquires tokens silently using the cached refresh token. No browser interaction is needed unless the refresh token expires (typically after 90 days of inactivity) or the token cache is cleared. When a token expires mid-session, the auth middleware detects the failure and re-initiates the configured flow with client-visible prompts.
+Before any of these flows starts, the server first tries to acquire a token silently from the cache. Interactive authentication only happens when that fails, so an expired access token with a live refresh token is renewed without the user noticing.
+
+On subsequent runs the server acquires tokens silently using the cached refresh credential. No browser interaction is needed unless it expires (typically after 90 days of inactivity) or the token cache is cleared. When a token expires mid-session, the auth middleware detects the failure and re-initiates the flow that the affected account was registered with — which may differ from the server default in a multi-account setup.
+
+While an authentication flow is outstanding, ordinary calendar and mail verbs report that authentication is in progress. The `account` verbs (`list`, `login`, `logout`, `refresh`, `add`, `remove`) stay available throughout, so the session can always be inspected and repaired.
 
 ## OAuth scopes used per feature
 

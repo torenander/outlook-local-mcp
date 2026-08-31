@@ -185,9 +185,9 @@ func TestAuthMiddleware_AuthFailure_ReturnsTroubleshooting(t *testing.T) {
 
 	text := extractResultText(result)
 	requiredSubstrings := []string{
-		"account_list",
-		"account_add",
-		"retry your original request",
+		`operation="list"`,
+		`operation="login"`,
+		"Retry your original request",
 	}
 	for _, sub := range requiredSubstrings {
 		if !strings.Contains(text, sub) {
@@ -343,9 +343,9 @@ func TestAuthMiddleware_ConcurrentReauth_DeviceCode(t *testing.T) {
 	state := newTestStateWithMethod(func(ctx context.Context, _ Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 		authCount.Add(1)
 		// Simulate device code credential sending a prompt on the channel.
-		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan string); ok {
+		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt); ok {
 			select {
-			case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code TEST":
+			case ch <- DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code TEST"}:
 			default:
 			}
 		}
@@ -615,9 +615,9 @@ func TestAuthMiddleware_BrowserAuth_ReturnsGuidance(t *testing.T) {
 
 	text := extractResultText(result)
 	requiredSubstrings := []string{
-		"account_list",
-		"account_add",
-		"retry your original request",
+		`operation="list"`,
+		`operation="login"`,
+		"Retry your original request",
 	}
 	for _, sub := range requiredSubstrings {
 		if !strings.Contains(text, sub) {
@@ -632,7 +632,7 @@ func TestAuthMiddleware_BrowserAuth_ReturnsGuidance(t *testing.T) {
 func TestAuthMiddleware_BrowserAuth_NoDeviceCodeChannel(t *testing.T) {
 	state := newTestStateWithMethod(func(ctx context.Context, _ Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 		// Verify no device code channel is in the context.
-		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan string); ok && ch != nil {
+		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt); ok && ch != nil {
 			t.Error("browser auth context should not contain deviceCodeMsgKey channel")
 		}
 		return testRecord(), nil
@@ -708,9 +708,9 @@ func TestAuthMiddleware_DeviceCodeAuth_PreservedBehavior(t *testing.T) {
 	state := newTestStateWithMethod(func(ctx context.Context, _ Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 		// Simulate the device code credential's UserPrompt callback by
 		// sending a message on the deviceCodeCh channel.
-		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan string); ok {
+		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt); ok {
 			select {
-			case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code ABC123":
+			case ch <- DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code ABC123"}:
 			default:
 			}
 		}
@@ -821,32 +821,38 @@ func TestAuthMiddleware_BrowserAuth_URLElicitation(t *testing.T) {
 	}
 }
 
-// TestAuthMiddleware_DeviceCodeAuth_FormElicitation verifies that
-// handleDeviceCodeAuth uses form mode elicitation when the client supports it.
-// The device code prompt is presented via elicitation instead of plain text.
-func TestAuthMiddleware_DeviceCodeAuth_FormElicitation(t *testing.T) {
+// TestAuthMiddleware_DeviceCodeAuth_URLElicitation verifies that
+// handleDeviceCodeAuth presents the device code as a one-click URL elicitation
+// with the user code pre-filled, and that accepting it waits for the
+// background flow and retries the original tool call (CR-0067 A7).
+func TestAuthMiddleware_DeviceCodeAuth_URLElicitation(t *testing.T) {
 	var elicitCalled bool
+	var capturedURL string
 	var capturedMessage string
 
 	state := newTestStateWithMethod(func(ctx context.Context, _ Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 		// Simulate device code prompt.
-		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan string); ok {
+		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt); ok {
 			select {
-			case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code XYZ123":
+			case ch <- DeviceCodePrompt{
+				Message:         "To sign in, visit https://microsoft.com/devicelogin and enter code XYZ123",
+				UserCode:        "XYZ123",
+				VerificationURL: "https://microsoft.com/devicelogin",
+			}:
 			default:
 			}
 		}
 		return testRecord(), nil
 	}, "device_code")
 
-	// Replace elicit with a mock that succeeds (elicitation supported).
-	state.elicit = func(_ context.Context, req mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+	// Replace urlElicit with a mock that succeeds (URL elicitation supported).
+	state.urlElicit = func(_ context.Context, _, url, message string) (*mcp.ElicitationResult, error) {
 		elicitCalled = true
-		capturedMessage = req.Params.Message
+		capturedURL = url
+		capturedMessage = message
 		return &mcp.ElicitationResult{
 			ElicitationResponse: mcp.ElicitationResponse{
-				Action:  mcp.ElicitationResponseActionAccept,
-				Content: map[string]any{"acknowledged": true},
+				Action: mcp.ElicitationResponseActionAccept,
 			},
 		}, nil
 	}
@@ -870,16 +876,24 @@ func TestAuthMiddleware_DeviceCodeAuth_FormElicitation(t *testing.T) {
 		t.Fatal("expected result, got nil")
 	}
 	if !elicitCalled {
-		t.Error("form elicitation should have been called")
+		t.Error("URL elicitation should have been called")
 	}
-	if !strings.Contains(capturedMessage, "devicelogin") {
-		t.Errorf("elicitation message = %q, want to contain device code prompt", capturedMessage)
+	if !strings.Contains(capturedURL, "microsoft.com/devicelogin") {
+		t.Errorf("elicitation URL = %q, want the device login page", capturedURL)
+	}
+	if !strings.Contains(capturedURL, "otc=XYZ123") {
+		t.Errorf("elicitation URL = %q, want the user code pre-filled via otc", capturedURL)
+	}
+	if !strings.Contains(capturedMessage, "Authentication required") {
+		t.Errorf("elicitation message = %q, want an explanation of the link", capturedMessage)
 	}
 
-	// The device code prompt should be returned as text even with elicitation.
-	text := extractResultText(result)
-	if !strings.Contains(text, "devicelogin") {
-		t.Errorf("result text = %q, want to contain device code prompt", text)
+	// After acknowledgement the original tool call is retried.
+	if result.IsError {
+		t.Fatalf("expected the retried tool result, got error: %q", extractResultText(result))
+	}
+	if callCount != 2 {
+		t.Errorf("handler call count = %d, want 2 (original + retry)", callCount)
 	}
 }
 
@@ -945,21 +959,22 @@ func TestAuthMiddleware_BrowserAuth_ElicitationFallback(t *testing.T) {
 }
 
 // TestAuthMiddleware_DeviceCodeAuth_ElicitationFallback verifies that when
-// form elicitation returns ErrElicitationNotSupported, the device code prompt
-// is returned as plain text (the pre-elicitation behavior).
+// URL elicitation returns ErrElicitationNotSupported, the device code prompt
+// is returned verbatim as plain text (the pre-elicitation behavior preserved
+// by CR-0031 and CR-0067 A7).
 func TestAuthMiddleware_DeviceCodeAuth_ElicitationFallback(t *testing.T) {
 	state := newTestStateWithMethod(func(ctx context.Context, _ Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
-		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan string); ok {
+		if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt); ok {
 			select {
-			case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code FALLBACK":
+			case ch <- DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code FALLBACK"}:
 			default:
 			}
 		}
 		return testRecord(), nil
 	}, "device_code")
 
-	// Form elicitation returns not supported.
-	state.elicit = func(_ context.Context, _ mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+	// URL elicitation returns not supported.
+	state.urlElicit = func(_ context.Context, _, _, _ string) (*mcp.ElicitationResult, error) {
 		return nil, mcpserver.ErrElicitationNotSupported
 	}
 
@@ -1121,9 +1136,9 @@ func TestAuthMiddleware_AccountAuthFromContext_DeviceCode(t *testing.T) {
 		authMethod:     "browser",
 		authenticate: func(ctx context.Context, auth Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 			// Simulate device code credential sending prompt.
-			if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt); ok {
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code CTXDC":
+				case ch <- DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code CTXDC"}:
 				default:
 				}
 			}
@@ -1392,11 +1407,11 @@ func TestHandleAuthCodeAuth_ExchangeFailure(t *testing.T) {
 		t.Fatal("expected IsError=true for exchange failure")
 	}
 	text := extractResultText(result)
-	if !strings.Contains(text, "account_list") {
-		t.Errorf("error text should contain recovery tool name account_list, got: %q", text)
+	if !strings.Contains(text, `operation="list"`) {
+		t.Errorf("error text should contain the account list recovery step, got: %q", text)
 	}
-	if !strings.Contains(text, "account_add") {
-		t.Errorf("error text should contain recovery tool name account_add, got: %q", text)
+	if !strings.Contains(text, `operation="login"`) {
+		t.Errorf("error text should contain the account login recovery step, got: %q", text)
 	}
 }
 
@@ -1532,13 +1547,13 @@ func TestHandleBrowserAuth_Timeout_DescriptiveError(t *testing.T) {
 	}
 
 	text := extractResultText(result)
-	if !strings.Contains(text, "account_list") {
-		t.Errorf("error = %q, want recovery tool name account_list", text)
+	if !strings.Contains(text, `operation="list"`) {
+		t.Errorf("error = %q, want the account list recovery step", text)
 	}
-	if !strings.Contains(text, "account_add") {
-		t.Errorf("error = %q, want recovery tool name account_add", text)
+	if !strings.Contains(text, `operation="login"`) {
+		t.Errorf("error = %q, want the account login recovery step", text)
 	}
-	if !strings.Contains(text, "retry your original request") {
+	if !strings.Contains(text, "Retry your original request") {
 		t.Errorf("error = %q, want to suggest retrying", text)
 	}
 }
@@ -1602,22 +1617,35 @@ func TestHandleAuthCodeAuth_ElicitationError_ReturnsAuthURL(t *testing.T) {
 // handler call, and auth error detection.
 func buildFullMiddleware(state *authMiddlewareState, handler func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error)) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		ctx, _ = withAccountAuthSlot(ctx)
+		recovery := isRecoveryOperation(request)
+
 		// Check if a background authentication flow completed.
 		if state.pendingAuth.Load() {
-			select {
-			case <-state.pendingDone:
-				state.pendingAuth.Store(false)
-				if state.pendingErr != nil {
-					return mcp.NewToolResultError(FormatAuthError(state.pendingErr)), nil
+			running, pendingErr := state.pendingOutcome()
+			switch {
+			case running && recovery:
+				return handler(ctx, request)
+			case running:
+				return mcp.NewToolResultError(pendingAuthMessage(state.authMethod)), nil
+			default:
+				state.settle()
+				if pendingErr != nil {
+					return mcp.NewToolResultError(FormatAuthErrorFor(pendingErr, state.authMethod)), nil
 				}
 				state.authenticated.CompareAndSwap(false, true)
-			default:
-				return mcp.NewToolResultError(pendingAuthMessage(state.authMethod)), nil
 			}
 		}
 
 		// Fresh-credential fast-path.
 		if !state.preAuthenticated.Load() && !state.authenticated.Load() {
+			if recovery {
+				return handler(ctx, request)
+			}
+			if TrySilentToken(ctx, state.cred, state.scopes) {
+				state.authenticated.CompareAndSwap(false, true)
+				return handler(ctx, request)
+			}
 			freshErr := fmt.Errorf("authentication required: credential not yet authenticated")
 			return state.handleAuthError(ctx, handler, request, freshErr)
 		}
@@ -1743,8 +1771,8 @@ func TestMiddleware_FreshCredential_DeviceCode_ImmediatePrompt(t *testing.T) {
 	deviceCodeMsg := "DC_TEST: To sign in, open https://microsoft.com/devicelogin and enter code TESTCODE"
 	state := newTestStateWithMethod(func(ctx context.Context, _ Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 		// Simulate the device code flow: send the device code message.
-		ch := ctx.Value(DeviceCodeMsgKey).(chan string)
-		ch <- deviceCodeMsg
+		ch := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt)
+		ch <- DeviceCodePrompt{Message: deviceCodeMsg}
 		// Wait for context cancellation (simulating user completing login).
 		<-ctx.Done()
 		return testRecord(), nil
@@ -1798,8 +1826,8 @@ func TestMiddleware_AllAuthErrors_UseFormatAuthError(t *testing.T) {
 	}
 
 	requiredSubstrings := []string{
-		"account_list",
-		"account_add",
+		`operation="list"`,
+		`operation="login"`,
 	}
 
 	assertFormatted := func(t *testing.T, label string, result *mcp.CallToolResult) {
@@ -1897,11 +1925,8 @@ func TestMiddleware_AllAuthErrors_UseFormatAuthError(t *testing.T) {
 		state.authenticated.Store(true)
 
 		// Simulate a completed background auth with error.
-		done := make(chan struct{})
-		close(done)
-		state.pendingAuth.Store(true)
-		state.pendingDone = done
-		state.pendingErr = fmt.Errorf("DeviceCodeCredential: AADSTS70000 auth failed")
+		attempt := state.begin()
+		attempt.finish(fmt.Errorf("DeviceCodeCredential: AADSTS70000 auth failed"))
 
 		handler := func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return successResult(), nil

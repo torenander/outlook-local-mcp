@@ -119,8 +119,8 @@ func RegisterTools(s *mcpserver.MCPServer, retryCfg graph.RetryConfig, timeout t
 
 	// CR-0060 Phase 3a: system domain aggregate tool. Replaces the individual
 	// status and complete_auth tool registrations with a single "system" tool
-	// dispatched by operation verb. complete_auth is gated on auth_code within
-	// NewSystemVerbs, preserving the pre-existing conditional behaviour.
+	// dispatched by operation verb. Since CR-0067 complete_auth is registered
+	// unconditionally so it is reachable whichever auth method is active.
 	//
 	// The sysRegistry pointer is captured by the help verb handler before
 	// RegisterDomainTool populates it. After registration, *sysRegistry is

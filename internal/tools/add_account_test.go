@@ -381,9 +381,9 @@ func TestAddAccount_DeviceCode_Success(t *testing.T) {
 			// deviceCodeCh case before p.done closes. Without this delay,
 			// the goroutine returns immediately and p.done may win the
 			// select race on CI where goroutine scheduling differs.
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code TEST123":
+				case ch <- auth.DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code TEST123"}:
 				default:
 				}
 			}
@@ -729,9 +729,9 @@ func TestAuthenticateDeviceCode_ElicitationError_ReturnsDeviceCode(t *testing.T)
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 			// Simulate device code prompt via channel.
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- deviceCodeMsg:
+				case ch <- auth.DeviceCodePrompt{Message: deviceCodeMsg}:
 				default:
 				}
 			}
@@ -801,9 +801,9 @@ func TestAuthenticateDeviceCode_ElicitationError_DoesNotBlock(t *testing.T) {
 		openBrowser:     func(_ string) error { return nil },
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- deviceCodeMsg:
+				case ch <- auth.DeviceCodePrompt{Message: deviceCodeMsg}:
 				default:
 				}
 			}
@@ -983,9 +983,9 @@ func TestAuthenticateDeviceCode_ElicitationError_NoStderrDependency(t *testing.T
 		openBrowser:     func(_ string) error { return nil },
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- deviceCodeMsg:
+				case ch <- auth.DeviceCodePrompt{Message: deviceCodeMsg}:
 				default:
 				}
 			}
@@ -1044,9 +1044,9 @@ func TestDeviceCode_PendingAuth_CompletedSuccessfully(t *testing.T) {
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 			// Send device code, then wait for signal to complete.
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code PEND1":
+				case ch <- auth.DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code PEND1"}:
 				default:
 				}
 			}
@@ -1145,9 +1145,9 @@ func TestDeviceCode_PendingAuth_StillInProgress(t *testing.T) {
 		openBrowser:     func(_ string) error { return nil },
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code PROG1":
+				case ch <- auth.DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code PROG1"}:
 				default:
 				}
 			}
@@ -1209,9 +1209,9 @@ func TestDeviceCode_PendingAuth_Failed(t *testing.T) {
 		openBrowser:     func(_ string) error { return nil },
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code FAIL1":
+				case ch <- auth.DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code FAIL1"}:
 				default:
 				}
 			}
@@ -1299,9 +1299,9 @@ func TestDeviceCode_PendingAuth_GoroutineNotCancelled(t *testing.T) {
 		openBrowser:     func(_ string) error { return nil },
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code NCANC":
+				case ch <- auth.DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code NCANC"}:
 				default:
 				}
 			}
@@ -1365,10 +1365,10 @@ func TestDeviceCode_PendingAuth_ThirdCallAfterFailure(t *testing.T) {
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 			callNum := authenticateCount.Add(1)
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				code := fmt.Sprintf("CODE%d", callNum)
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code " + code:
+				case ch <- auth.DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code " + code}:
 				default:
 				}
 			}
@@ -1473,9 +1473,9 @@ func TestDeviceCode_ElicitationSupported_NoPendingState(t *testing.T) {
 		openBrowser:     func(_ string) error { return nil },
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code ELICIT1":
+				case ch <- auth.DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code ELICIT1"}:
 				default:
 				}
 			}
@@ -1645,9 +1645,9 @@ func TestDeviceCode_PendingAuth_Timeout(t *testing.T) {
 		setupCredential: fakeSetupCredential,
 		authenticate: func(ctx context.Context, _ auth.Authenticator, _ string, _ []string) (azidentity.AuthenticationRecord, error) {
 			authenticateCount.Add(1)
-			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan string); ok {
+			if ch, ok := ctx.Value(auth.DeviceCodeMsgKey).(chan auth.DeviceCodePrompt); ok {
 				select {
-				case ch <- "To sign in, visit https://microsoft.com/devicelogin and enter code TIMEOUT1":
+				case ch <- auth.DeviceCodePrompt{Message: "To sign in, visit https://microsoft.com/devicelogin and enter code TIMEOUT1"}:
 				default:
 				}
 			}
@@ -1668,7 +1668,7 @@ func TestDeviceCode_PendingAuth_Timeout(t *testing.T) {
 	// the 300s timeout expiring.
 	shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	deviceCodeCh := make(chan string, 1)
+	deviceCodeCh := make(chan auth.DeviceCodePrompt, 1)
 	shortCtx = context.WithValue(shortCtx, auth.DeviceCodeMsgKey, deviceCodeCh)
 
 	p := &pendingAccount{

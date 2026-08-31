@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
@@ -98,12 +99,22 @@ func (s *accountResolverState) middleware(next mcpserver.ToolHandlerFunc) mcpser
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		ctx = WithGraphClient(ctx, entry.Client)
-		ctx = WithAccountAuth(ctx, AccountAuth{
+		accountAuth := AccountAuth{
 			Authenticator:  entry.Authenticator,
 			AuthRecordPath: entry.AuthRecordPath,
 			AuthMethod:     inferAuthMethod(entry),
-		})
+		}
+
+		ctx = WithGraphClient(ctx, entry.Client)
+		ctx = WithAccountAuth(ctx, accountAuth)
+
+		// Report the resolved account back to AuthMiddleware, which wraps this
+		// middleware and therefore cannot see the context derived here
+		// (CR-0067 A6). Without this, re-authentication after an auth error
+		// would always target the server default credential.
+		if slot, ok := accountAuthSlotFromContext(ctx); ok {
+			slot.store(accountAuth)
+		}
 		ctx = WithAccountInfo(ctx, AccountInfo{
 			Label:    entry.Label,
 			Email:    entry.Email,
@@ -384,19 +395,36 @@ func (s *accountResolverState) elicitAccountSelection(ctx context.Context) (*Acc
 	}
 }
 
-// inferAuthMethod determines the auth method string for an account entry by
-// checking whether the entry's Authenticator implements the AuthCodeFlow
-// interface. If so, the method is "auth_code"; otherwise it defaults to
-// "browser" as the primary auth method per CR-0024.
+// inferAuthMethod determines the auth method string for an account entry, so
+// that AuthMiddleware selects the recovery flow the account was actually
+// registered with.
+//
+// The entry's persisted AuthMethod is authoritative when set: it is what
+// SetupCredentialForAccount used to build the credential, and it survives
+// restarts through accounts.json. Only when it is empty does the function fall
+// back to inspecting the credential — AuthCodeFlow implies "auth_code", a
+// *azidentity.DeviceCodeCredential implies "device_code", and anything else is
+// treated as "browser".
+//
+// Before CR-0067 the credential inspection was the only rule and it collapsed
+// every non-AuthCodeFlow credential to "browser", so a device_code account
+// would have been sent through the browser recovery flow.
 //
 // Parameters:
 //   - entry: the account entry to infer the auth method from.
 //
-// Returns "auth_code" when the Authenticator implements AuthCodeFlow,
-// or "browser" otherwise.
+// Returns one of "auth_code", "device_code" or "browser". No side effects.
 func inferAuthMethod(entry *AccountEntry) string {
+	switch entry.AuthMethod {
+	case "auth_code", "device_code", "browser":
+		return entry.AuthMethod
+	}
+
 	if _, ok := entry.Authenticator.(AuthCodeFlow); ok {
 		return "auth_code"
+	}
+	if _, ok := entry.Authenticator.(*azidentity.DeviceCodeCredential); ok {
+		return "device_code"
 	}
 	return "browser"
 }

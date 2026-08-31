@@ -260,6 +260,16 @@ func setupBrowserCredential(cfg config.Config, tokenCache azidentity.Cache, reco
 		Cache:                tokenCache,
 		AuthenticationRecord: record,
 		RedirectURL:          "http://localhost",
+
+		// DisableAutomaticAuthentication makes GetToken silent-only: on a cache
+		// miss it returns azidentity.AuthenticationRequiredError instead of
+		// falling through to AcquireTokenInteractive. This is what allows the
+		// auth middleware to probe the cache speculatively (CR-0067 A1) and
+		// stops the Graph SDK's bearer-token policy from opening a browser
+		// window in the middle of an unrelated tool call. Authenticate() calls
+		// reqToken directly and does not consult this option, so the deliberate
+		// interactive flow in handleBrowserAuth is unaffected.
+		DisableAutomaticAuthentication: true,
 	}
 
 	cred, err := azidentity.NewInteractiveBrowserCredential(opts)
@@ -290,6 +300,16 @@ func setupDeviceCodeCredential(cfg config.Config, tokenCache azidentity.Cache, r
 		Cache:                tokenCache,
 		AuthenticationRecord: record,
 		UserPrompt:           deviceCodeUserPrompt,
+
+		// DisableAutomaticAuthentication makes GetToken silent-only: on a cache
+		// miss it returns azidentity.AuthenticationRequiredError instead of
+		// falling through to AcquireTokenByDeviceCode, which would emit a fresh
+		// device code nobody asked for. This is what allows the auth middleware
+		// to probe the cache speculatively (CR-0067 A1) and lets the startup
+		// probe run for device_code at all. Authenticate() calls reqToken
+		// directly and does not consult this option, so the deliberate
+		// interactive flow in handleDeviceCodeAuth is unaffected.
+		DisableAutomaticAuthentication: true,
 	}
 
 	cred, err := azidentity.NewDeviceCodeCredential(opts)
@@ -305,10 +325,12 @@ func setupDeviceCodeCredential(cfg config.Config, tokenCache azidentity.Cache, r
 // message channel from callers to deviceCodeUserPrompt.
 type deviceCodeMsgKeyType struct{}
 
-// DeviceCodeMsgKey is the context key for injecting a chan string into the
-// authentication context. The middleware and add_account handler write this
-// channel so that deviceCodeUserPrompt can forward the device code message
-// back, allowing callers to present it to the user.
+// DeviceCodeMsgKey is the context key for injecting a chan DeviceCodePrompt
+// into the authentication context. The middleware and add_account handler
+// write this channel so that deviceCodeUserPrompt can forward the structured
+// device code challenge back, allowing callers to present it to the user —
+// either as the verbatim message or as a one-click URL with the code
+// pre-filled (CR-0067 A7).
 var DeviceCodeMsgKey = deviceCodeMsgKeyType{}
 
 // deviceCodeUserPrompt is the UserPrompt callback used by DeviceCodeCredential.
@@ -317,9 +339,10 @@ var DeviceCodeMsgKey = deviceCodeMsgKeyType{}
 // during re-authentication). When no MCPServer is available, the message is
 // written to stderr as a fallback.
 //
-// Additionally, if the context contains a device code message channel (injected
-// by the auth middleware via DeviceCodeMsgKey), the message is forwarded through
-// it so the middleware can return it as a tool result visible to the user.
+// Additionally, if the context contains a device code prompt channel (injected
+// by the auth middleware via DeviceCodeMsgKey), the structured prompt is
+// forwarded through it so the middleware can return it as a tool result
+// visible to the user, or render it as a one-click sign-in URL.
 //
 // Parameters:
 //   - ctx: the context provided by the credential during Authenticate. When
@@ -330,10 +353,12 @@ var DeviceCodeMsgKey = deviceCodeMsgKeyType{}
 // is unlikely and non-fatal).
 func deviceCodeUserPrompt(ctx context.Context, msg azidentity.DeviceCodeMessage) error {
 	// Forward to middleware channel if available, so the device code
-	// message can be returned as a tool result visible in the chat.
-	if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan string); ok {
+	// challenge can be returned as a tool result visible in the chat. The
+	// whole struct is forwarded (not just msg.Message) so the receiver can
+	// build a one-click sign-in URL from UserCode.
+	if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt); ok {
 		select {
-		case ch <- msg.Message:
+		case ch <- NewDeviceCodePrompt(msg):
 		default:
 		}
 	}

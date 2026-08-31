@@ -649,10 +649,10 @@ func TestFormatFolderTreeText_Flat(t *testing.T) {
 func TestFormatFolderTreeText_Nested(t *testing.T) {
 	listing := FolderListing{Nodes: []FolderNode{
 		{
-			Name: "Inbox", Path: "Inbox", Unread: 12, Total: 340, SubfolderCount: 2,
+			Name: "Inbox", Path: "Inbox", Unread: 12, Total: 340, SubfolderCount: 1, Expanded: true,
 			Children: []FolderNode{
 				{
-					Name: "01 Projects", Path: "Inbox/01 Projects", Unread: 0, Total: 58, SubfolderCount: 1,
+					Name: "01 Projects", Path: "Inbox/01 Projects", Unread: 0, Total: 58, SubfolderCount: 1, Expanded: true,
 					Children: []FolderNode{
 						{Name: "Swedfund", Path: "Inbox/01 Projects/Swedfund", Unread: 0, Total: 8},
 					},
@@ -693,14 +693,86 @@ func TestFormatFolderTreeText_UnnamedFolder(t *testing.T) {
 }
 
 // TestFormatFolderTreeText_SubfolderHint verifies that a non-recursive listing
-// tells the caller which folders have subfolders it did not fetch.
+// tells the caller which folders have subfolders it did not fetch, and that
+// the suggested fix matches how the listing was requested.
 func TestFormatFolderTreeText_SubfolderHint(t *testing.T) {
-	result := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{
-		{Name: "Inbox", Path: "Inbox", Total: 10, SubfolderCount: 4},
-	}})
+	node := FolderNode{Name: "Inbox", Path: "Inbox", Total: 10, SubfolderCount: 4}
 
-	if !strings.Contains(result, "[+4 subfolders — use recursive=true]") {
-		t.Errorf("expected subfolder hint, got:\n%s", result)
+	flat := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{node}})
+	if !strings.Contains(flat, "[+4 subfolders — use recursive=true]") {
+		t.Errorf("a non-recursive listing should suggest recursive=true, got:\n%s", flat)
+	}
+
+	// Same unexpanded node, but the caller already asked to recurse — so the
+	// only remaining lever is depth, and suggesting recursive=true would be
+	// advice they have already followed.
+	deep := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{node}, Recursive: true})
+	if !strings.Contains(deep, "[+4 subfolders — increase max_depth]") {
+		t.Errorf("a recursive listing should suggest increase max_depth, got:\n%s", deep)
+	}
+	if strings.Contains(deep, "recursive=true") {
+		t.Errorf("must not tell a recursive caller to pass recursive=true, got:\n%s", deep)
+	}
+}
+
+// TestFormatFolderTreeText_HiddenSubfoldersNotActionable is the regression test
+// for the state conflation found by live testing against a real Microsoft 365
+// mailbox.
+//
+// "Conversation History" reports childFolderCount=1 (the Teams "Team Chat"
+// folder) but returns nothing from GET /childFolders. The node was expanded,
+// so the caller has already done everything they can; the old formatter told
+// them to "use recursive=true" — advice that produces an empty result and
+// invites an LLM to retry forever.
+func TestFormatFolderTreeText_HiddenSubfoldersNotActionable(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{
+		Recursive: true,
+		Nodes: []FolderNode{{
+			Name: "Conversation History", Path: "Conversation History",
+			SubfolderCount: 1, Expanded: true,
+		}},
+	})
+
+	if !strings.Contains(result, "[1 subfolder hidden]") {
+		t.Errorf("expected a hidden-subfolder annotation, got:\n%s", result)
+	}
+	for _, forbidden := range []string{"recursive=true", "max_depth", "max_results"} {
+		if strings.Contains(result, forbidden) {
+			t.Errorf("must not suggest %q for a subfolder Graph withheld, got:\n%s", forbidden, result)
+		}
+	}
+}
+
+// TestFormatFolderTreeText_HiddenSubfoldersPartial verifies the same
+// disambiguation when Graph returns some but not all of the children it
+// counted — the milder form of the same trap.
+func TestFormatFolderTreeText_HiddenSubfoldersPartial(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{
+		Recursive: true,
+		Nodes: []FolderNode{{
+			Name: "Inbox", Path: "Inbox", SubfolderCount: 3, Expanded: true,
+			Children: []FolderNode{{Name: "Clients", Path: "Inbox/Clients"}},
+		}},
+	})
+
+	if !strings.Contains(result, "[2 subfolders hidden]") {
+		t.Errorf("expected the two withheld subfolders to be reported, got:\n%s", result)
+	}
+}
+
+// TestFormatFolderTreeText_ExpandedNoHint verifies that a fully expanded node
+// carries no annotation at all, so the common case stays cheap.
+func TestFormatFolderTreeText_ExpandedNoHint(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{
+		Recursive: true,
+		Nodes: []FolderNode{{
+			Name: "Inbox", Path: "Inbox", SubfolderCount: 1, Expanded: true,
+			Children: []FolderNode{{Name: "Clients", Path: "Inbox/Clients"}},
+		}},
+	})
+
+	if strings.Contains(result, "[") {
+		t.Errorf("a fully expanded node needs no annotation, got:\n%s", result)
 	}
 }
 

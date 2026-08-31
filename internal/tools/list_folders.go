@@ -131,6 +131,7 @@ func NewHandleListFolders(retryCfg graph.RetryConfig, timeout time.Duration) fun
 			Nodes:     buildFolderTree(ctx, client, retryCfg, timeout, folders, rootPath, depth-1, maxResults, logger),
 			Root:      rootPath,
 			Truncated: truncated,
+			Recursive: recursive,
 		}
 
 		logger.Info("tool completed",

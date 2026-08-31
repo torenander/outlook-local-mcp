@@ -598,6 +598,11 @@ func FormatAttachmentsText(atts []map[string]any) string {
 // and listings that Graph truncated are annotated inline; neither is ever
 // silently omitted.
 //
+// Unexpanded and unreturned subfolders are annotated differently on purpose.
+// "Not looked at" is fixed by recursing or raising max_depth and says so;
+// "looked at, Graph withheld it" cannot be fixed by the caller, so it must not
+// suggest a retry that would loop forever.
+//
 // Parameters:
 //   - listing: the folder listing to render, including its root path and
 //     root-level truncation flag.
@@ -615,7 +620,7 @@ func FormatFolderTreeText(listing FolderListing) string {
 	}
 
 	var b strings.Builder
-	formatFolderNodes(&b, listing.Nodes, 0)
+	formatFolderNodes(&b, listing.Nodes, 0, listing.Recursive)
 
 	if listing.Truncated {
 		b.WriteString("\n(More folders exist than were returned. Raise max_results to see the rest.)\n")
@@ -638,9 +643,11 @@ func FormatFolderTreeText(listing FolderListing) string {
 //   - b: the builder to write to.
 //   - nodes: the folders at the current level.
 //   - depth: the current nesting depth (0 at the requested level).
+//   - recursive: whether the caller asked to descend, which selects the wording
+//     of the unexplored-subfolder hint.
 //
 // Side effects: writes to b.
-func formatFolderNodes(b *strings.Builder, nodes []FolderNode, depth int) {
+func formatFolderNodes(b *strings.Builder, nodes []FolderNode, depth int, recursive bool) {
 	indent := strings.Repeat("  ", depth)
 	for _, n := range nodes {
 		name := n.Name
@@ -659,13 +666,38 @@ func formatFolderNodes(b *strings.Builder, nodes []FolderNode, depth int) {
 			fmt.Fprintf(b, " [subfolders unavailable: %s]", n.Err)
 		case n.Truncated:
 			b.WriteString(" [more subfolders not shown — raise max_results]")
-		case len(n.Children) == 0 && n.SubfolderCount > 0:
-			fmt.Fprintf(b, " [+%d subfolders — use recursive=true]", n.SubfolderCount)
+		case n.UnexploredChildren() > 0:
+			// Actionable: the caller can reach these by asking for them.
+			fix := "use recursive=true"
+			if recursive {
+				fix = "increase max_depth"
+			}
+			fmt.Fprintf(b, " [+%d subfolders — %s]", n.UnexploredChildren(), fix)
+		case n.UnreturnedChildren() > 0:
+			// NOT actionable: Graph counted these and then withheld them.
+			// Suggesting a retry here sends the caller into a loop.
+			fmt.Fprintf(b, " [%s hidden]", pluralFolders(n.UnreturnedChildren()))
 		}
 		b.WriteString("\n")
 
-		formatFolderNodes(b, n.Children, depth+1)
+		formatFolderNodes(b, n.Children, depth+1, recursive)
 	}
+}
+
+// pluralFolders renders a subfolder count with the right noun, e.g.
+// "1 subfolder" or "3 subfolders".
+//
+// Parameters:
+//   - n: the count to render.
+//
+// Returns the formatted count and noun.
+//
+// Side effects: none.
+func pluralFolders(n int) string {
+	if n == 1 {
+		return "1 subfolder"
+	}
+	return fmt.Sprintf("%d subfolders", n)
 }
 
 // deepestFolderPath returns the path of the deepest folder in the tree, which

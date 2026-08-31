@@ -27,19 +27,28 @@ const (
 	mockSwedfundID = "AAMkAGI2THVSSwedfundAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	mockArchiveID  = "AAMkAGI2THVSArchiveAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	mockReportsID  = "AAMkAGI2THVSReportsAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	mockConvHistID = "AAMkAGI2THVSConvHistAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 )
 
 // newFolderMockHandler returns an http.Handler serving this hierarchy:
 //
-//	Inbox           3 unread / 42
-//	  01 Projects   0 / 58
-//	    Swedfund    0 / 8
-//	Archive         0 / 1204
-//	Team Reports    1 unread / 7
+//	Inbox                  3 unread / 42
+//	  01 Projects          0 / 58
+//	    Swedfund           0 / 8
+//	Archive                0 / 1204
+//	Team Reports           1 unread / 7
+//	Conversation History   0 / 0     childFolderCount=1, child listing EMPTY
 //
 // Inbox and Archive are also Graph well-known names, so they can be addressed
 // either way; "Team Reports" exists so that display-name matching at the top
 // level is exercised without the well-known shortcut.
+//
+// "Conversation History" reproduces a real Microsoft 365 behaviour found by
+// live testing: Graph reports childFolderCount=1 (the Teams "Team Chat"
+// folder) but GET /childFolders returns nothing, because hidden folders are
+// counted and then withheld unless includeHiddenFolders=true. Expanding it
+// therefore succeeds and yields zero children, which is a different state from
+// never having expanded it.
 //
 // Parameters:
 //   - t: the test, used only to mark this a helper.
@@ -57,6 +66,7 @@ func newFolderMockHandler(t *testing.T, seen *[]string) http.Handler {
 			folderJSON(mockInboxID, "Inbox", 3, 42, 1),
 			folderJSON(mockArchiveID, "Archive", 0, 1204, 0),
 			folderJSON(mockReportsID, "Team Reports", 1, 7, 0),
+			folderJSON(mockConvHistID, "Conversation History", 0, 0, 1),
 		),
 		mockGraphPrefix + "/" + mockInboxID + "/childFolders": inboxChildren,
 		mockGraphPrefix + "/inbox/childFolders":               inboxChildren,
@@ -67,6 +77,9 @@ func newFolderMockHandler(t *testing.T, seen *[]string) http.Handler {
 		mockGraphPrefix + "/" + mockArchiveID + "/childFolders":  folderCollection(),
 		mockGraphPrefix + "/archive/childFolders":                folderCollection(),
 		mockGraphPrefix + "/" + mockReportsID + "/childFolders":  folderCollection(),
+		// Counted but withheld: childFolderCount=1, zero children returned.
+		mockGraphPrefix + "/" + mockConvHistID + "/childFolders": folderCollection(),
+		mockGraphPrefix + "/conversationhistory/childFolders":    folderCollection(),
 		mockGraphPrefix + "/" + mockProjectsID:                   folderJSON(mockProjectsID, "01 Projects", 0, 58, 1),
 	}
 

@@ -45,6 +45,13 @@ type FolderNode struct {
 	// children, or when the child fetch failed (see Err).
 	Children []FolderNode
 
+	// Expanded records that a child fetch was attempted for this node AND
+	// returned successfully. It is what separates "not looked at" from
+	// "looked at, found nothing", two states that are indistinguishable from
+	// Children alone and that call for opposite advice: the first is fixed by
+	// recursing deeper, the second cannot be fixed by the caller at all.
+	Expanded bool
+
 	// Err is a PII-redacted message describing why this node's children could
 	// not be loaded. Empty when the subtree loaded successfully or was never
 	// requested. Consumers MUST surface it so incomplete subtrees are visible.
@@ -71,6 +78,53 @@ type FolderListing struct {
 	// Truncated is true when the root-level listing hit max_results and Graph
 	// reported that more folders were available.
 	Truncated bool
+
+	// Recursive records whether the caller asked to descend. It selects the
+	// wording of the unexplored-subfolder hint: without it the fix is
+	// recursive=true, with it the fix is a larger max_depth.
+	Recursive bool
+}
+
+// UnreturnedChildren reports how many immediate children Graph counted but did
+// not hand back when this node was expanded.
+//
+// Graph routinely reports a childFolderCount that exceeds what
+// GET /childFolders returns, because hidden folders are counted but withheld
+// unless includeHiddenFolders=true. The Teams "Team Chat" folder under
+// "Conversation History" is the common example: childFolderCount is 1 and the
+// child listing is empty.
+//
+// Returns 0 when the node was never expanded (nothing was asked, so nothing
+// can be missing), 0 when every counted child came back, and 0 when the child
+// listing was truncated — paging already explains that gap, and reporting it
+// as withheld as well would double-count the same missing folders under two
+// incompatible explanations.
+//
+// Side effects: none.
+func (n FolderNode) UnreturnedChildren() int {
+	if !n.Expanded || n.Truncated {
+		return 0
+	}
+	missing := int(n.SubfolderCount) - len(n.Children)
+	if missing < 0 {
+		return 0
+	}
+	return missing
+}
+
+// UnexploredChildren reports how many immediate children this node is known to
+// have but was never asked about, because the listing was not recursive or the
+// depth budget ran out. Unlike UnreturnedChildren, this state IS actionable by
+// the caller: recursing or raising max_depth will reveal them.
+//
+// Returns 0 once the node has been expanded, whatever the fetch returned.
+//
+// Side effects: none.
+func (n FolderNode) UnexploredChildren() int {
+	if n.Expanded || n.SubfolderCount <= 0 {
+		return 0
+	}
+	return int(n.SubfolderCount)
 }
 
 // CountFolders returns the total number of folders in the listing, including

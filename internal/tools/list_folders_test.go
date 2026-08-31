@@ -94,7 +94,7 @@ func TestListFolders_DefaultIsSingleLevelText(t *testing.T) {
 		"- Archive — 0 / 1204",
 		"- Team Reports — 1 unread / 7",
 		"[+1 subfolders — use recursive=true]",
-		"3 folders. Target one with folder=",
+		"4 folders. Target one with folder=",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in default output, got:\n%s", want, text)
@@ -274,6 +274,88 @@ func TestClampInt32(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := clampInt32(tt.value, tt.minValue, tt.maxValue, tt.fallback); got != tt.out {
 				t.Errorf("clampInt32(%v) = %d, want %d", tt.value, got, tt.out)
+			}
+		})
+	}
+}
+
+// TestListFolders_HiddenSubfolderNotMislabelled reproduces, end to end, the bug
+// that live testing against a real Microsoft 365 mailbox exposed and that the
+// original mock could not.
+//
+// "Conversation History" reports childFolderCount=1 (the Teams "Team Chat"
+// folder) but returns nothing from GET /childFolders, because Graph counts
+// hidden folders and then withholds them. With recursive=true and the node
+// comfortably inside max_depth, the node WAS expanded — so the old
+// "[+1 subfolders — use recursive=true]" hint was simply false, and following
+// it returns an empty listing that invites an endless retry.
+func TestListFolders_HiddenSubfolderNotMislabelled(t *testing.T) {
+	result, _ := callListFolders(t, map[string]any{"recursive": true, "max_depth": float64(2)})
+	text := resultText(t, result)
+
+	var line string
+	for _, l := range strings.Split(text, "\n") {
+		if strings.Contains(l, "Conversation History") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("Conversation History missing from output:\n%s", text)
+	}
+
+	if !strings.Contains(line, "[1 subfolder hidden]") {
+		t.Errorf("expected the withheld subfolder to be reported as hidden, got: %q", line)
+	}
+	for _, forbidden := range []string{"recursive=true", "max_depth", "max_results"} {
+		if strings.Contains(line, forbidden) {
+			t.Errorf("must not suggest %q for a folder Graph withheld, got: %q", forbidden, line)
+		}
+	}
+
+	// The sibling that genuinely has reachable children must still expand, so
+	// the fix does not suppress real subfolders.
+	if !strings.Contains(text, "  - 01 Projects — 0 / 58") {
+		t.Errorf("expandable siblings must still expand, got:\n%s", text)
+	}
+}
+
+// TestListFolders_UnexploredHintTracksRecursion verifies the actionable hint
+// names the lever the caller has not pulled yet: recursive=true when they did
+// not recurse, max_depth when they did but ran out of budget.
+func TestListFolders_UnexploredHintTracksRecursion(t *testing.T) {
+	flat, _ := callListFolders(t, map[string]any{})
+	if !strings.Contains(resultText(t, flat), "[+1 subfolders — use recursive=true]") {
+		t.Errorf("non-recursive listing should suggest recursive=true, got:\n%s", resultText(t, flat))
+	}
+
+	// max_depth=2 expands Inbox but not 01 Projects, which still has a child.
+	deep, _ := callListFolders(t, map[string]any{"recursive": true, "max_depth": float64(2)})
+	text := resultText(t, deep)
+	if !strings.Contains(text, "[+1 subfolders — increase max_depth]") {
+		t.Errorf("depth-limited node should suggest increase max_depth, got:\n%s", text)
+	}
+}
+
+// TestListFolders_HiddenSubfolderInJSONTiers verifies the same disambiguation
+// reaches both JSON tiers. subfolder_count=1 with no children and no
+// explanation is the identical trap in machine-readable form.
+func TestListFolders_HiddenSubfolderInJSONTiers(t *testing.T) {
+	for _, tc := range []struct{ mode, hidden, unexplored string }{
+		{"summary", `"hidden_subfolders":1`, `"unexplored_subfolders":1`},
+		{"raw", `"_hiddenChildFolders":1`, `"_unexploredChildFolders":1`},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			result, _ := callListFolders(t, map[string]any{
+				"recursive": true, "max_depth": float64(2), "output": tc.mode,
+			})
+			text := resultText(t, result)
+
+			if !strings.Contains(text, tc.hidden) {
+				t.Errorf("%s output must flag the withheld subfolder, got:\n%s", tc.mode, text)
+			}
+			if !strings.Contains(text, tc.unexplored) {
+				t.Errorf("%s output must flag the depth-limited subfolder, got:\n%s", tc.mode, text)
 			}
 		})
 	}

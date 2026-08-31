@@ -58,6 +58,11 @@ requirements and acceptance criteria below rather than tracked separately:
    `ResolveFolderRef` unchanged, and adds no new concepts. The prompt bug
    itself is fixed separately as the pre-existing defect it is.
 
+6. **Found by live testing only: unexpanded and withheld subfolders are
+   different states.** See "Counted but withheld" below. The formatter
+   conflated "I did not look" with "I looked and Graph returned nothing",
+   emitting an actionable retry hint for a condition no retry can fix.
+
 Two defects found during review are also fixed: `max_depth` was off by one
 against its own documentation, and every folder listing capped silently at 100
 entries per level with `@odata.nextLink` ignored.
@@ -152,6 +157,56 @@ path, which `list_folders` uses as the prefix for the paths it emits. This is
 what closes the loop: every path printed by the default text tier is a valid
 argument to `folder`, `parent`, and `destination`.
 
+### Counted but withheld (found by live testing)
+
+Microsoft Graph reports a `childFolderCount` that includes folders it will not
+return from `GET /childFolders`. Hidden folders are counted and then withheld
+unless `includeHiddenFolders=true`. Against a live Microsoft 365 mailbox:
+
+```
+list_folders recursive=true max_depth=2
+  -> - Conversation History — 0 / 0 [+1 subfolders — use recursive=true]
+
+list_folders folder="Conversation History" recursive=true max_depth=3 output=summary
+  -> {"count":0,"folders":[],"parent":"Conversation History"}
+```
+
+`childFolderCount` is 1 — the Teams "Team Chat" folder — and the child listing
+is empty. `recursive=true` had already been passed and the node sat at depth 1,
+well inside `max_depth=2`, so the hint was simply false: following it returns
+nothing, and an agent that trusts it can retry indefinitely.
+
+The cause is that `Children` alone cannot distinguish two states:
+
+| State | Meaning | Correct advice |
+|---|---|---|
+| Not expanded | The walk never descended (not recursive, or depth exhausted) | Recurse, or raise `max_depth` |
+| Expanded, nothing returned | Graph counted children and withheld them | **None.** The caller cannot fix this |
+
+`FolderNode.Expanded` now records that a fetch was attempted *and succeeded*,
+and `UnexploredChildren()` / `UnreturnedChildren()` derive the two states from
+it. All three output tiers report them distinctly: text renders
+`[+N subfolders — use recursive=true]`, `[+N subfolders — increase max_depth]`,
+or `[N subfolders hidden]`; summary adds `unexplored_subfolders` /
+`hidden_subfolders`; raw adds `_unexploredChildFolders` / `_hiddenChildFolders`.
+Truncated listings report neither, because paging already explains the gap.
+
+**This class of defect was unreachable from the mock.** The mock was written
+from the Graph documentation, where `childFolderCount` is described as the
+number of child folders — so it only ever produced self-consistent fixtures in
+which the count matched the children returned. Only a real mailbox contains a
+folder that violates that assumption. The mock now reproduces the topology
+(`mockConvHistID`, `childFolderCount: 1`, empty child listing) and
+`TestListFolders_HiddenSubfolderNotMislabelled` pins it, but the *fixture came
+from production*. This is the concrete argument for `make crud-test`: the unit
+suite can only falsify assumptions someone already thought to question.
+
+**Out of scope:** surfacing the hidden folders themselves. Graph supports
+`includeHiddenFolders=true` on `GET /childFolders`, which would make the Teams
+"Team Chat" folder and its siblings visible. That is a product decision about
+what the tool should expose, not a formatting fix, and it belongs in its own
+CR. This change only stops the tool from lying about them.
+
 ### Alias declaration rule
 
 The prior `*_folder_id` spellings all remain accepted at runtime, but they are
@@ -233,6 +288,7 @@ in all three tiers.
 * **FR-12:** `folder`, `parent`, and `destination` **MUST** accept a Graph well-known folder name, a slash-separated display-name path, a top-level folder display name, or a raw Graph folder id. A reference that resolves to nothing **MUST** produce an error naming the failing segment and the candidates available at that level. The prior spellings `folder_id`, `parent_folder_id`, and `destination_folder_id` **MUST** remain accepted at runtime. An alias **MUST** be declared in the tool schema if and only if a client that strips undeclared arguments would cause a *silent* wrong result; aliases whose loss produces a clear error **MUST NOT** be declared, and `list_folders` **MUST NOT** re-declare `folder_id`. See the alias declaration rule above.
 * **FR-13:** `list_folders` **MUST** be available with `MAIL_ENABLED` alone. Folder writes **MUST** remain behind `MAIL_MANAGE_ENABLED`.
 * **FR-15:** `list_messages` and `search_messages` **MUST** accept `folder` as a natural-language folder reference resolved by `ResolveFolderRef`, with `folder_id` retained as an alias that accepts the same reference forms. An unresolvable reference **MUST** return an error rather than falling back to an unscoped query, because a silently widened query returns plausible results.
+* **FR-16:** A subfolder count that exceeds the children returned **MUST** be attributed to a specific cause. A node that was never expanded **MUST** be reported as unexplored with the action that would reveal it; a node that was expanded and had children withheld by Graph **MUST NOT** suggest any retry. Truncated listings report neither, because paging already accounts for the gap.
 * **FR-14:** No folder listing **MUST** truncate silently. When Graph reports `@odata.nextLink`, the response **MUST** say so in whichever tier is active.
 
 ### Non-Functional Requirements
@@ -480,6 +536,7 @@ Then the response states that more folders exist than were returned, in whicheve
 |------|-----------|--------|------------|
 | Recursive `list_folders` generates excessive Graph API calls for deep hierarchies | Medium | Medium | `recursive` defaults to false; `max_depth` capped at 10, default 3; RetryGraphCall handles 429 backoff |
 | Path resolution costs one Graph request per path segment | Medium | Low | Well-known names and id-shaped references resolve with no request at all; only display-name paths walk, and each level is a single `$select`-projected listing |
+| Graph counts child folders it will not return, so a subfolder hint suggests a retry that cannot succeed | Certain (observed live) | Medium | **Fixed.** `FolderNode.Expanded` separates "not looked at" from "looked at, withheld"; only the first gets actionable advice. Pinned by `TestListFolders_HiddenSubfolderNotMislabelled` against a mock reproducing the live topology |
 | A display name that looks like a Graph id is mis-resolved | Low | Medium | The id heuristic runs only after path resolution and top-level name matching have been attempted, so a real folder always wins. Validated against a live mailbox: ids are 120 chars of URL-safe base64, display names are under 25 chars with spaces — no overlap near the 40-char threshold |
 | A Graph folder id fails the id heuristic and is treated as a path | Low | Medium | **Closed.** Live Microsoft 365 folder ids measured at 120 characters with zero characters outside the accepted alphabet. `TestLooksLikeGraphFolderID_LiveMailboxID` pins a real id so a future change to the constant or alphabet fails the build |
 | Renaming `folder_id` / `parent_folder_id` / `destination_folder_id` breaks existing callers | Low | Low | None of the four write verbs has ever shipped in a release, so there are no released callers. All three old spellings are still accepted at runtime, and `parent_folder_id` — the only one whose loss would be silent — stays declared so MCP clients keep forwarding it |

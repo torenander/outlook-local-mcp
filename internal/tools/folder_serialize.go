@@ -12,6 +12,13 @@
 //     omits everything that is zero-information, for programmatic reasoning.
 //   - raw speaks Microsoft Graph's vocabulary (displayName, unreadItemCount,
 //     childFolderCount) and omits nothing, for debugging against the API.
+//
+// Both tiers disambiguate a subfolder count that exceeds the children present.
+// Graph reports childFolderCount including folders it will not return, so a
+// count of 1 with an empty child list is genuinely ambiguous: either the tree
+// walk never descended, or it descended and Graph withheld the folder. The
+// projections name which one it was so a consumer never retries a fetch that
+// cannot succeed.
 package tools
 
 // SerializeSummaryFolders projects a folder listing into the compact `summary`
@@ -60,6 +67,14 @@ func summaryNodes(nodes []FolderNode) []map[string]any {
 		}
 		if n.Err != "" {
 			m["error"] = n.Err
+		}
+		// subfolder_count > 0 with no children is ambiguous on its own, so say
+		// which of the two states it is. Exactly one of these can be non-zero.
+		if v := n.UnexploredChildren(); v > 0 {
+			m["unexplored_subfolders"] = v
+		}
+		if v := n.UnreturnedChildren(); v > 0 {
+			m["hidden_subfolders"] = v
 		}
 		out = append(out, m)
 	}
@@ -111,6 +126,15 @@ func rawNodes(nodes []FolderNode) []map[string]any {
 		}
 		if n.Err != "" {
 			m["_error"] = n.Err
+		}
+		// Graph's own childFolderCount cannot distinguish "not fetched" from
+		// "fetched and withheld", so both are recorded explicitly. The
+		// underscore prefix marks them as ours, not Graph's.
+		if v := n.UnexploredChildren(); v > 0 {
+			m["_unexploredChildFolders"] = v
+		}
+		if v := n.UnreturnedChildren(); v > 0 {
+			m["_hiddenChildFolders"] = v
 		}
 		out = append(out, m)
 	}

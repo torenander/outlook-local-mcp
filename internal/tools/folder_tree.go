@@ -64,6 +64,11 @@ func buildFolderTree(
 					"error", graph.FormatGraphError(err))
 				node.Err = fmt.Sprintf("could not load subfolders: %s", graph.RedactGraphError(err))
 			} else {
+				// Mark the node expanded even when children is empty: Graph
+				// counting a child it declines to return (hidden folders) is a
+				// different state from never having asked, and only the fetch
+				// can tell them apart.
+				node.Expanded = true
 				node.Truncated = truncated
 				node.Children = buildFolderTree(ctx, client, retryCfg, timeout, children, node.Path, remainingDepth-1, maxResults, logger)
 			}

@@ -11,8 +11,9 @@ import (
 	"testing"
 )
 
-// sampleFolderListing is a two-level listing with one truncated node and one
-// failed subtree, exercising every optional key in both projections.
+// sampleFolderListing is a two-level listing covering every optional key in
+// both projections: a normal expanded subtree, a failed subtree, a truncated
+// listing, a node Graph withheld children from, and a node never expanded.
 func sampleFolderListing() FolderListing {
 	return FolderListing{
 		Root:      "Inbox",
@@ -20,7 +21,7 @@ func sampleFolderListing() FolderListing {
 		Nodes: []FolderNode{
 			{
 				ID: "id-projects", Name: "01 Projects", Path: "Inbox/01 Projects",
-				Unread: 2, Total: 58, SubfolderCount: 1,
+				Unread: 2, Total: 58, SubfolderCount: 1, Expanded: true,
 				Children: []FolderNode{
 					{ID: "id-swedfund", Name: "Swedfund", Path: "Inbox/01 Projects/Swedfund", Total: 8},
 				},
@@ -31,7 +32,17 @@ func sampleFolderListing() FolderListing {
 			},
 			{
 				ID: "id-big", Name: "Big", Path: "Inbox/Big",
-				SubfolderCount: 900, Truncated: true,
+				SubfolderCount: 900, Expanded: true, Truncated: true,
+			},
+			// Expanded, but Graph counted a child and withheld it.
+			{
+				ID: "id-convhist", Name: "Conversation History", Path: "Conversation History",
+				SubfolderCount: 1, Expanded: true,
+			},
+			// Never expanded: the depth budget ran out before this node.
+			{
+				ID: "id-deep", Name: "Deep", Path: "Inbox/Deep",
+				SubfolderCount: 4,
 			},
 		},
 	}
@@ -42,8 +53,8 @@ func sampleFolderListing() FolderListing {
 func TestSerializeSummaryFolders(t *testing.T) {
 	out := SerializeSummaryFolders(sampleFolderListing())
 
-	if got := out["count"]; got != 4 {
-		t.Errorf("count = %v, want 4 (recursive)", got)
+	if got := out["count"]; got != 6 {
+		t.Errorf("count = %v, want 6 (five top-level nodes plus one fetched child)", got)
 	}
 	if out["truncated"] != true {
 		t.Error("root-level truncation must be reported in summary output")
@@ -53,8 +64,8 @@ func TestSerializeSummaryFolders(t *testing.T) {
 	}
 
 	folders := out["folders"].([]map[string]any)
-	if len(folders) != 3 {
-		t.Fatalf("folders length = %d, want 3", len(folders))
+	if len(folders) != 5 {
+		t.Fatalf("folders length = %d, want 5", len(folders))
 	}
 
 	projects := folders[0]
@@ -83,6 +94,23 @@ func TestSerializeSummaryFolders(t *testing.T) {
 	if folders[2]["truncated"] != true {
 		t.Error("a truncated child listing must be flagged in summary output")
 	}
+	if _, ok := folders[2]["hidden_subfolders"]; ok {
+		t.Error("a truncated listing must not also report withheld children; paging already explains the gap")
+	}
+
+	// The two states that a bare subfolder_count cannot distinguish.
+	if folders[3]["hidden_subfolders"] != 1 {
+		t.Errorf("expanded-but-withheld node should report hidden_subfolders=1, got %v", folders[3]["hidden_subfolders"])
+	}
+	if _, ok := folders[3]["unexplored_subfolders"]; ok {
+		t.Error("an expanded node has nothing left unexplored")
+	}
+	if folders[4]["unexplored_subfolders"] != 4 {
+		t.Errorf("never-expanded node should report unexplored_subfolders=4, got %v", folders[4]["unexplored_subfolders"])
+	}
+	if _, ok := folders[4]["hidden_subfolders"]; ok {
+		t.Error("a node that was never expanded cannot have withheld children")
+	}
 }
 
 // TestSerializeRawFolders verifies the Graph vocabulary, the collection shape,
@@ -95,8 +123,8 @@ func TestSerializeRawFolders(t *testing.T) {
 	}
 
 	value := out["value"].([]map[string]any)
-	if len(value) != 3 {
-		t.Fatalf("value length = %d, want 3", len(value))
+	if len(value) != 5 {
+		t.Fatalf("value length = %d, want 5", len(value))
 	}
 
 	projects := value[0]
@@ -116,6 +144,12 @@ func TestSerializeRawFolders(t *testing.T) {
 	}
 	if value[1]["_error"] != "could not load subfolders: throttled" {
 		t.Error("a failed subtree must surface its error in raw output")
+	}
+	if value[3]["_hiddenChildFolders"] != 1 {
+		t.Errorf("raw must flag the withheld child, got %v", value[3]["_hiddenChildFolders"])
+	}
+	if value[4]["_unexploredChildFolders"] != 4 {
+		t.Errorf("raw must flag the unexplored children, got %v", value[4]["_unexploredChildFolders"])
 	}
 }
 

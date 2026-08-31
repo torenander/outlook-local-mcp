@@ -533,10 +533,10 @@ Call `{tool: "mail", args: {operation: "list_messages", ...}}` four times with t
 
 | Call | Parameters                                                | Expected                                                         |
 |------|-----------------------------------------------------------|------------------------------------------------------------------|
-| 30b  | `folder: "Inbox", is_read: false`                         | Only unread messages are listed; count matches folder unread     |
-| 30c  | `folder: "Inbox", flag_status: "flagged"`                 | Only flagged messages are listed                                |
-| 30d  | `folder: "Inbox", provenance: "created_by_mcp"`           | Only MCP-tagged messages (may be empty if none created yet)     |
-| 30e  | `folder: "Inbox"` (no filters, baseline)                  | Baseline message count recorded for comparison                  |
+| 30b  | `folder_id: "Inbox", is_read: false`                      | Only unread messages are listed; count matches folder unread     |
+| 30c  | `folder_id: "Inbox", flag_status: "flagged"`              | Only flagged messages are listed                                |
+| 30d  | `folder_id: "Inbox", provenance: "created_by_mcp"`        | Only MCP-tagged messages (may be empty if none created yet)     |
+| 30e  | `folder_id: "Inbox"` (no filters, baseline)               | Baseline message count recorded for comparison                  |
 
 - **Verify:** All calls return plain text. The filtered counts are less than or equal to the baseline.
 - **Fail:** If any call returns an error or ignores the filter.
@@ -563,7 +563,7 @@ Call `{tool: "mail", args: {operation: "update_draft", message_id: "<draft ID>",
 
 Call `{tool: "mail", args: {operation: "create_reply_draft", message_id: "<draft ID>", comment: "Replying to my own draft."}}`. **Note:** `create_reply_draft` cannot reply to a draft message (Microsoft Graph constraint); the call is expected to return an error indicating the source must be a received or sent message. Fall back to using a recent Inbox message ID for this step.
 
-If the server rejects replying to a draft, instead pick the most recent message from `{tool: "mail", args: {operation: "list_messages", folder: "Inbox"}}` and reply to it. Record the reply draft ID as **reply draft ID**.
+If the server rejects replying to a draft, instead pick the most recent message from `{tool: "mail", args: {operation: "list_messages", folder_id: "Inbox"}}` and reply to it. Record the reply draft ID as **reply draft ID**.
 
 - **Verify:** Response is plain text confirming the reply draft creation with a new message ID.
 - **Fail:** If no reply draft is created.
@@ -580,7 +580,7 @@ Then call `{tool: "mail", args: {operation: "delete_draft", message_id: "<draft 
 
 ### Step 35 -- Get conversation
 
-Call `{tool: "mail", args: {operation: "list_messages", folder: "Inbox", top: 1}}` and record the first message's `conversationId` as **conversation ID**. If Inbox is empty, skip Step 35.
+Call `{tool: "mail", args: {operation: "list_messages", folder_id: "Inbox", max_results: 1}}` and record the first message's `conversationId` as **conversation ID**. If Inbox is empty, skip Step 35.
 
 Call `{tool: "mail", args: {operation: "get_conversation", id: "<conversation ID>"}}`.
 
@@ -589,7 +589,7 @@ Call `{tool: "mail", args: {operation: "get_conversation", id: "<conversation ID
 
 ### Step 36 -- Get attachment
 
-Using `{tool: "mail", args: {operation: "list_messages", folder: "Inbox", has_attachments: true, top: 1}}` pick a message that has attachments. If none found, skip Step 36.
+Using `{tool: "mail", args: {operation: "list_messages", folder_id: "Inbox", has_attachments: true, max_results: 1}}` pick a message that has attachments. If none found, skip Step 36.
 
 Call `{tool: "mail", args: {operation: "get_message", id: "<message ID>", output: "summary"}}` to enumerate its attachment IDs. Then call:
 

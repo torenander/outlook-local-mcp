@@ -16,7 +16,6 @@ import (
 
 	"github.com/desek/outlook-local-mcp/internal/graph"
 	"github.com/desek/outlook-local-mcp/internal/logging"
-	"github.com/desek/outlook-local-mcp/internal/validate"
 	"github.com/mark3labs/mcp-go/mcp"
 	msgraphcore "github.com/microsoftgraph/msgraph-sdk-go-core"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
@@ -161,12 +160,12 @@ func NewHandleSearchMessages(retryCfg graph.RetryConfig, timeout time.Duration) 
 			return mcp.NewToolResultError("query is required: provide a KQL search string (e.g., subject:\"Design Review\")"), nil
 		}
 
-		// Extract and validate optional folder_id.
-		folderID := request.GetString("folder_id", "")
-		if folderID != "" {
-			if err := validate.ValidateResourceID(folderID, "folder_id"); err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
+		// Extract and validate the optional folder scope. `folder` is a
+		// natural-language folder reference (well-known name, display-name path,
+		// top-level name, or Graph id); folder_id remains accepted as an alias.
+		folderID, err := ResolveFolderParam(ctx, client, retryCfg, timeout, request, "folder", "folder_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		maxResultsFloat := request.GetFloat("max_results", 25)

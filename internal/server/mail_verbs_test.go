@@ -211,6 +211,15 @@ func TestMailVerbs_AliasDeclarationRule(t *testing.T) {
 		{"move_message", "destination_folder_id", false, "losing it fails loudly with a missing-parameter error"},
 		{"move_messages", "destination", true, "canonical parameter"},
 		{"delete_folder", "folder", true, "canonical parameter"},
+		// list_messages and search_messages declare `folder` even though
+		// list_folders already contributes it to the union, so neither verb
+		// silently depends on list_folders staying registered: losing `folder`
+		// would widen a scoped query to the whole mailbox with plausible
+		// results. Duplicate names are deduped, so this costs no schema bytes.
+		{"list_messages", "folder", true, "losing it silently widens the query to all folders"},
+		{"list_messages", "folder_id", true, "the union's source for folder_id; list_folders relies on it"},
+		{"search_messages", "folder", true, "losing it silently widens the search to all folders"},
+		{"search_messages", "folder_id", true, "keeps the alias working if list_messages is ever regated"},
 	}
 	for _, c := range cases {
 		if got := declares(c.verb, c.param); got != c.want {

@@ -43,6 +43,21 @@ requirements and acceptance criteria below rather than tracked separately:
    This reverses rejected alternative 1 of the original CR; see the alternatives
    section.
 
+5. **Scope added after evidence: `list_messages` and `search_messages` accept
+   `folder` too.** This was explicitly *out of scope* when the amendment was
+   written, and the decision was reversed by evidence, not preference. Review
+   of `docs/prompts/mcp-tool-crud-test.md` found seven rows passing
+   `folder: "Inbox"` to `list_messages`, which reads only `folder_id` — so
+   those steps had been silently querying the entire mailbox instead of Inbox
+   since release 0.4.0, while still appearing to pass. Someone who knew this
+   codebase well wrote the natural thing seven times and was silently wrong
+   every time. Once `folder` is the parameter on every folder verb but
+   `list_messages` still demands a differently-named Graph id, the surface
+   actively invites that mistake; a half-abstracted API is worse than an
+   unabstracted one. The scope increase is bounded to those two verbs, reuses
+   `ResolveFolderRef` unchanged, and adds no new concepts. The prompt bug
+   itself is fixed separately as the pre-existing defect it is.
+
 Two defects found during review are also fixed: `max_depth` was off by one
 against its own documentation, and every folder listing capped silently at 100
 entries per level with `@odata.nextLink` ignored.
@@ -166,10 +181,18 @@ Measured effect on the serialized `mail` tool schema:
 |---|---|---|
 | Both aliases declared, verbose descriptions | 6163 | +453 |
 | Both dropped | 5954 | +244 |
-| **Rule applied** (`parent_folder_id` declared, terse; `destination_folder_id` dropped) | **6027** | **+317** |
+| **Rule applied** (`parent_folder_id` declared, terse; `destination_folder_id` dropped) | 6027 | +317 |
+| **Final**, after adding `folder` to `list_messages` and `search_messages` | **6019** | **+309** |
+
+Adding `folder` to those two verbs cost **zero** schema bytes: `list_folders`
+already contributes the name and `aggregateSchemaOptions` dedupes by parameter
+name. The listed 8-byte drop is from tightening the two `folder_id`
+descriptions at the same time. Declaring a name a second time is free, and it
+removes an invisible dependency on `list_folders` staying registered — so the
+rule's answer here is "declare, it is free and the failure would be silent".
 
 The rule recovers 136 of the 453 bytes without giving up a single safety
-property. The residual +317 is the honest price of natural-language addressing:
+property. The residual +309 is the honest price of natural-language addressing:
 `folder`, `recursive`, `max_depth`, `parent`, and `destination` are five new
 parameters in a flat union, and they buy the ability to address a folder the
 way a user names it. Set against the ~1,500 tokens of identifier that a
@@ -209,6 +232,7 @@ in all three tiers.
 * **FR-11:** Every folder and move verb **MUST** have annotation test assertions. Presence and gating assertions live in `internal/tools/tool_annotations_test.go`; the per-verb readOnly/destructive/idempotent/openWorld matrix lives in `internal/server/mail_verbs_test.go`, because per-verb `Annotations` are consumed when the aggregate tool is built and are not observable from outside the `server` package.
 * **FR-12:** `folder`, `parent`, and `destination` **MUST** accept a Graph well-known folder name, a slash-separated display-name path, a top-level folder display name, or a raw Graph folder id. A reference that resolves to nothing **MUST** produce an error naming the failing segment and the candidates available at that level. The prior spellings `folder_id`, `parent_folder_id`, and `destination_folder_id` **MUST** remain accepted at runtime. An alias **MUST** be declared in the tool schema if and only if a client that strips undeclared arguments would cause a *silent* wrong result; aliases whose loss produces a clear error **MUST NOT** be declared, and `list_folders` **MUST NOT** re-declare `folder_id`. See the alias declaration rule above.
 * **FR-13:** `list_folders` **MUST** be available with `MAIL_ENABLED` alone. Folder writes **MUST** remain behind `MAIL_MANAGE_ENABLED`.
+* **FR-15:** `list_messages` and `search_messages` **MUST** accept `folder` as a natural-language folder reference resolved by `ResolveFolderRef`, with `folder_id` retained as an alias that accepts the same reference forms. An unresolvable reference **MUST** return an error rather than falling back to an unscoped query, because a silently widened query returns plausible results.
 * **FR-14:** No folder listing **MUST** truncate silently. When Graph reports `@odata.nextLink`, the response **MUST** say so in whichever tier is active.
 
 ### Non-Functional Requirements
@@ -216,7 +240,7 @@ in all three tiers.
 * **NFR-1:** Every level of a recursive `list_folders` call, and every request issued while resolving a folder path, **MUST** use `RetryGraphCall` with 429 backoff to respect Graph API rate limits.
 * **NFR-2:** Each handler **MUST** live in its own file under `internal/tools/` per the project's file isolation convention.
 * **NFR-3:** All exported functions **MUST** have Go doc comments per CLAUDE.md documentation standards.
-* **NFR-4:** The merged verb **MUST NOT** grow the mail tool's operation enum or its top-level description. Measured: description 1745 to 1581 characters, enum 19 to 17 operations. The serialized schema does grow, to 6027 bytes from 5710, because natural-language addressing adds five parameters to the aggregate union; the alias declaration rule holds that growth to +317 bytes rather than +453.
+* **NFR-4:** The merged verb **MUST NOT** grow the mail tool's operation enum or its top-level description. Measured: description 1745 to 1581 characters, enum 19 to 17 operations. The serialized schema does grow, to 6019 bytes from 5710, because natural-language addressing adds five parameters to the aggregate union; the alias declaration rule holds that growth to +309 bytes rather than +453.
 
 ## Affected Components
 
@@ -229,6 +253,8 @@ in all three tiers.
 * `internal/tools/folder_node.go` — `FolderNode`, `FolderListing`, `CountFolders`.
 * `internal/tools/folder_serialize.go` — the `summary` and `raw` projections.
 * `internal/tools/param_alias.go` — `firstStringParam`, the parameter-alias helper.
+* `internal/tools/folder_param.go` — `ResolveFolderParam`, the request-to-folder-id bridge shared by the folder-scoped read verbs.
+* `internal/tools/list_messages.go`, `search_messages.go` — `folder` scope resolved through `ResolveFolderRef` (amendment item 5).
 * `internal/tools/create_folder.go`, `delete_folder.go`, `move_message.go`, `move_messages.go` — reference resolution and renamed parameters.
 * `internal/tools/text_format.go` — `FormatFolderTreeText` rewritten as a markdown tree; `FormatMailFoldersText` and `formatFolderTreeLevel` removed.
 * `extension/manifest.json` — updated mail tool description.
@@ -254,7 +280,8 @@ in all three tiers.
 * Copying messages (Graph has a `/copy` action; deferred to a future CR).
 * Folder-level permissions or sharing.
 * Following `@odata.nextLink` to auto-paginate. Truncation is reported instead; raising `max_results` is the escape hatch.
-* Extending path addressing to `list_messages` / `search_messages` `folder_id` (deferred; those verbs still take an id or well-known name).
+* ~~Extending path addressing to `list_messages` / `search_messages`.~~ **Moved into scope on 2026-08-31** — see amendment item 5. Deferring it would have left `folder` meaning "folder reference" on five verbs and nothing at all on the two most-used ones.
+* Extending path addressing beyond `list_messages` and `search_messages`. No other verb takes a folder argument today; if one is added it should use `ResolveFolderRef` from the start.
 * Modifying the `Mail.ReadWrite` scope request logic (already handled by `MailManageEnabled`).
 
 ## Alternative Approaches Considered
@@ -284,8 +311,8 @@ in all three tiers.
 * `text_format.go` loses two folder formatters and gains one markdown tree formatter.
 * Five verb builders in `mail_verbs.go`; two removed.
 * Aggregate annotations unchanged (already most-conservative).
-* Mail tool description 1745 to 1581 characters; operation enum 19 to 17. The serialized mail tool schema grows from 5710 to **6027** bytes: path addressing adds `folder`, `recursive`, `max_depth`, `parent`, and `destination` to the aggregate union, and the enum and description savings do not fully offset them. The alias declaration rule keeps one of the three legacy aliases in the schema instead of all three, recovering 136 bytes of the 453 the naive version cost.
-* Against that +317 bytes paid once per session, the default text tier stops emitting 120-character folder ids — roughly 30 to 40 tokens each, ~1,500 tokens for a 40-folder listing — on every call.
+* Mail tool description 1745 to 1581 characters; operation enum 19 to 17. The serialized mail tool schema grows from 5710 to **6019** bytes: path addressing adds `folder`, `recursive`, `max_depth`, `parent`, and `destination` to the aggregate union, and the enum and description savings do not fully offset them. The alias declaration rule keeps one of the three legacy aliases in the schema instead of all three, recovering 136 bytes of the 453 the naive version cost.
+* Against that +309 bytes paid once per session, the default text tier stops emitting 120-character folder ids — roughly 30 to 40 tokens each, ~1,500 tokens for a 40-folder listing — on every call.
 
 ### Business Impact
 
@@ -320,6 +347,9 @@ in all three tiers.
 | `folder_ref_test.go` | `TestLooksLikeGraphFolderID_LiveMailboxID` | Pins the id heuristic to a real 120-char Microsoft 365 folder id and to real display names | Live-captured id + real folder names | Id recognised, names rejected |
 | `internal/server/mail_verbs_test.go` | `TestMailVerbs_AliasDeclarationRule` | Pins which legacy aliases are schema-declared and why | Verb registry | `parent_folder_id` declared; `folder_id` and `destination_folder_id` not |
 | `move_message_test.go` | `TestMoveMessage_AcceptsLegacyDestinationAlias` | Undeclared alias still honoured at runtime | `destination_folder_id` only | Not a missing-parameter error |
+| `folder_param_test.go` | `TestMessageVerbs_FolderByPath`, `_ByWellKnownName`, `_FolderIDAliasStillWorks` | FR-15 on both verbs, table-driven so they cannot drift | Mock hierarchy | Query scoped to the resolved folder id |
+| `folder_param_test.go` | `TestMessageVerbs_UnresolvableFolderErrors` | FR-15 no silent widening | `folder: "Inbox/Nope"` | Actionable error; no `/messages` request issued |
+| `folder_param_test.go` | `TestMessageVerbs_NoFolderQueriesAllFolders` | Folder scope stays optional | no folder argument | No folder lookup; unscoped query |
 
 ### Tests to Modify
 

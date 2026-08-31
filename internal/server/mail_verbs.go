@@ -187,7 +187,7 @@ func buildListFoldersVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(str
 			// declared here because list_messages already contributes it to the
 			// aggregate schema with a description that suits that verb better.
 			mcp.WithString("folder",
-				mcp.Description("Folder to browse: well-known name (inbox), path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID. Omit for the top level."),
+				mcp.Description("Folder to target: well-known name (inbox), path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID. Omit for the default scope."),
 			),
 			mcp.WithBoolean("recursive",
 				mcp.Description("Descend into subfolders (default false = one level)."),
@@ -218,9 +218,10 @@ func buildListMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(st
 	return tools.Verb{
 		Name:        "list_messages",
 		Summary:     "list messages in a folder or across all folders; filter by date, sender, thread",
-		Description: "Lists messages in a mail folder or across all folders, with optional filters for date range, sender, conversation thread, read state, draft state, attachment presence, importance, and flag status. Results include a bodyPreview; use get_message with output=raw for the full HTML body. For full-text search, use search_messages instead.",
+		Description: "Lists messages in a mail folder or across all folders. `folder` accepts a well-known name (\"inbox\"), a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID; folder_id is accepted as an alias. Supports optional filters for date range, sender, conversation thread, read state, draft state, attachment presence, importance, and flag status. Results include a bodyPreview; use get_message with output=raw for the full HTML body. For full-text search, use search_messages instead.",
 		Examples: []tools.Example{
-			{Args: map[string]any{"folder_id": "Inbox", "is_read": false}, Comment: "list unread messages in inbox"},
+			{Args: map[string]any{"folder": "Inbox", "is_read": false}, Comment: "list unread messages in inbox"},
+			{Args: map[string]any{"folder": "Inbox/01 Projects", "max_results": 10}, Comment: "list messages in a nested folder addressed by path"},
 			{Args: map[string]any{"from": "alice@contoso.com", "max_results": 10}, Comment: "list recent messages from a sender"},
 		},
 		SeeDocs: []string{"concepts#output-tiers", "concepts#mail-gating"},
@@ -232,8 +233,17 @@ func buildListMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(st
 			mcp.WithOpenWorldHintAnnotation(true),
 		},
 		Schema: []mcp.ToolOption{
+			// Declared even though list_folders already contributes `folder` to
+			// the aggregate union, so this verb does not silently depend on
+			// list_folders staying registered: if `folder` ever left the union,
+			// a stripping client would turn a scoped query into an all-folders
+			// query with plausible-looking results. Duplicate names are deduped
+			// by aggregateSchemaOptions, so this costs no schema bytes.
+			mcp.WithString("folder",
+				mcp.Description("Folder to list messages from: well-known name (inbox), path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID. Omit to list from all folders."),
+			),
 			mcp.WithString("folder_id",
-				mcp.Description("Mail folder ID to list messages from. Omit to list from all folders."),
+				mcp.Description("Alias for `folder`; also accepts folder names and paths."),
 			),
 			mcp.WithString("start_datetime",
 				mcp.Description("Start of date range (ISO 8601, e.g. 2026-03-12T00:00:00Z). Filters by receivedDateTime >=."),
@@ -321,10 +331,11 @@ func buildSearchMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(
 	return tools.Verb{
 		Name:        "search_messages",
 		Summary:     "full-text KQL search across messages; ranked by relevance, not chronologically",
-		Description: "Searches mail messages using Keyword Query Language (KQL). Results are ranked by relevance, not chronological order. KQL supports field-scoped queries such as 'subject:\"meeting\"', 'from:alice@contoso.com', and 'hasAttachments:true'. Use list_messages with date filters for chronological browsing.",
+		Description: "Searches mail messages using Keyword Query Language (KQL). Results are ranked by relevance, not chronological order. KQL supports field-scoped queries such as 'subject:\"meeting\"', 'from:alice@contoso.com', and 'hasAttachments:true'. Use list_messages with date filters for chronological browsing. `folder` restricts the search and accepts a well-known name, a display-name path (\"Inbox/01 Projects\") as printed by list_folders, a top-level folder name, or a Graph folder ID; folder_id is accepted as an alias.",
 		Examples: []tools.Example{
 			{Args: map[string]any{"query": "subject:\"quarterly review\""}, Comment: "find messages with a specific subject"},
 			{Args: map[string]any{"query": "from:alice@contoso.com hasAttachments:true"}, Comment: "find messages with attachments from a sender"},
+			{Args: map[string]any{"query": "budget", "folder": "Inbox/01 Projects"}, Comment: "search within a nested folder addressed by path"},
 		},
 		SeeDocs: []string{"concepts#output-tiers"},
 		Handler: wrap("mail.search_messages", "read", tools.NewHandleSearchMessages(rc, c.timeout)),
@@ -339,8 +350,11 @@ func buildSearchMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(
 				mcp.Required(),
 				mcp.Description("KQL search string (e.g. subject:\"Design Review\" from:alice@contoso.com)."),
 			),
+			mcp.WithString("folder",
+				mcp.Description("Folder to restrict the search to: well-known name, path (\"Inbox/01 Projects\"), top-level name, or Graph folder ID. Omit to search all folders."),
+			),
 			mcp.WithString("folder_id",
-				mcp.Description("Mail folder ID to restrict search to. Omit to search all folders."),
+				mcp.Description("Alias for `folder`; also accepts folder names and paths."),
 			),
 			mcp.WithNumber("max_results",
 				mcp.Description("Maximum number of messages to return (default 25, max 100)."),

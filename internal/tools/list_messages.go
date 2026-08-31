@@ -166,12 +166,12 @@ func NewHandleListMessages(retryCfg graph.RetryConfig, timeout time.Duration, pr
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		// Extract and validate optional parameters.
-		folderID := request.GetString("folder_id", "")
-		if folderID != "" {
-			if err := validate.ValidateResourceID(folderID, "folder_id"); err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
+		// Extract and validate optional parameters. `folder` is a natural-language
+		// folder reference (well-known name, display-name path, top-level name, or
+		// Graph id); folder_id remains accepted as an alias.
+		folderID, err := ResolveFolderParam(ctx, client, retryCfg, timeout, request, "folder", "folder_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		startDatetime := request.GetString("start_datetime", "")

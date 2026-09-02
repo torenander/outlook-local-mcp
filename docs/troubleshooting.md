@@ -55,7 +55,7 @@ Common failure modes and remediation steps for `outlook-local-mcp`.
 - The server tries a silent token refresh before every prompt, so a device code should appear only on a genuinely cold cache — not merely because an access token expired.
 - The sign-in link is a navigation shortcut only. You always have to type the code.
 - A device code flow that is never completed no longer freezes the session. The background attempt is bounded at 300 seconds, after which the pending state clears by itself.
-- While a device code sign-in is outstanding, calendar and mail verbs report that authentication is in progress, but every `account` verb (`list`, `login`, `refresh`, ...) remains callable.
+- While a device code sign-in is outstanding, calendar and mail verbs report that authentication is in progress, but every `account` verb (`list`, `login`, `refresh`, ...) remains callable and returns promptly. `account.list` may show a blank email for accounts whose address has not been resolved yet, and `account.refresh` declines with an explanation — both because the credential is locked for the duration of the sign-in. Use `account.login` if you need to act.
 - If your organisation blocks device code flow (`AADSTS50199`), you will need your own app registration with an `http://localhost` redirect URI, set via `OUTLOOK_MCP_CLIENT_ID`, which selects the `browser` flow.
 
 ---

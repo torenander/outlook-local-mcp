@@ -537,9 +537,15 @@ func (s *authMiddlewareState) handleBrowserAuth(
 	// Start the browser auth flow in the background.
 	attempt := s.begin()
 
+	// Signal that the credential's internal lock is about to be held for the
+	// duration of the flow, so best-effort Graph work skips rather than blocks
+	// (CR-0067 A4; see inflight.go).
+	BeginInteractiveAuth()
+
 	go func() {
 		var err error
 		defer func() {
+			EndInteractiveAuth()
 			cancelAuth()
 			attempt.finish(err)
 		}()
@@ -621,9 +627,15 @@ func (s *authMiddlewareState) handleDeviceCodeAuth(
 	// return the device code prompt to the agent/user immediately.
 	attempt := s.begin()
 
+	// Signal that the credential's internal lock is about to be held for the
+	// duration of the flow, so best-effort Graph work skips rather than blocks
+	// (CR-0067 A4; see inflight.go).
+	BeginInteractiveAuth()
+
 	go func() {
 		var err error
 		defer func() {
+			EndInteractiveAuth()
 			cancelAuth()
 			attempt.finish(err)
 		}()

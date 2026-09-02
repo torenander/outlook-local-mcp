@@ -95,6 +95,8 @@ On subsequent runs the server acquires tokens silently using the cached refresh 
 
 While an authentication flow is outstanding, ordinary calendar and mail verbs report that authentication is in progress. The `account` verbs (`list`, `login`, `logout`, `refresh`, `add`, `remove`) stay available throughout, so the session can always be inspected and repaired.
 
+Two of them behave slightly differently during that window, because the identity library holds a lock on the credential for the duration of a sign-in: `account.list` omits email addresses it has not already resolved (they reappear on a later call), and `account.refresh` declines with an explanation rather than waiting — a refresh is redundant while the sign-in that will mint a fresh token is still running. `account.login` is unaffected and is the verb to use.
+
 ## OAuth scopes used per feature
 
 The server requests scopes incrementally. Expanding mail access after initial consent triggers a re-consent prompt.

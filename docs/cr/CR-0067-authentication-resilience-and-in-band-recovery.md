@@ -100,7 +100,7 @@ Seven changes, labelled A1-A7, implemented together because each removes one lin
 | A1 | Construct every azidentity credential with `DisableAutomaticAuthentication: true` so `GetToken` is silent-only, then attempt a bounded silent token acquisition before any interactive flow, on both the fresh-credential fast path and the auth-error path, for all three methods. |
 | A2 | *(withdrawn)* Changing the inferred default to `auth_code`. Implemented, tested live, reverted — see [Rejected alternatives](#rejected-alternatives). The identifier is retained so the labels here match the branch history. |
 | A3 | Register `system.complete_auth` unconditionally; when the target account is not on `auth_code`, return the recovery path that does apply. |
-| A4 | Exempt the `account` domain from the pending-auth freeze and the fresh-credential fast path; bound the device code background context at 300s; make the pending-auth bookkeeping race free. |
+| A4 | Exempt the `account` domain from the pending-auth freeze and the fresh-credential fast path; bound both background auth contexts at 300s; make the pending-auth bookkeeping race free; and stop credential-touching work in the exempted handlers from blocking on the SDK's non-context-aware credential lock. |
 | A5 | Rewrite the recovery guidance to be correct and method-aware; reorder `classifyAuthError` so specific detail survives. |
 | A6 | Hand the resolved account back to the middleware through a mutable context slot; make the resolver's method inference honour the persisted `auth_method` and recognise `DeviceCodeCredential`. |
 | A7 | Present the device code as a URL-mode elicitation: a direct link to the device sign-in page, plus a message quoting the code to type there. On acknowledgement, wait for the flow and retry the original call. Keep the plain-text fallback verbatim and unaugmented. |
@@ -151,6 +151,7 @@ flowchart TD
 9. When `system.complete_auth` is invoked against a credential that does not implement `AuthCodeFlow`, the handler **MUST** return a message naming the recovery path for the method that account actually uses, and **MUST NOT** report an internal type error.
 10. While a background authentication flow is pending, calls to the `account` aggregate tool **MUST** be passed through to their handlers rather than answered with the pending message.
 11. On the fresh-credential fast path, calls to the `account` aggregate tool **MUST** be passed through to their handlers rather than diverted into an authentication flow.
+11a. Passing through is not sufficient: an exempted verb **MUST** also return promptly. No handler reached by the exemption may block on the credential while an interactive flow holds it. Work that only enriches a response **MUST** be skipped, and work that cannot succeed **MUST** be declined with an actionable message, rather than either one waiting on the lock.
 12. The device code background authentication context **MUST** carry a 300-second deadline so the pending flag clears without operator intervention.
 13. The pending-authentication completion channel and error **MUST** be published such that concurrent readers observe them without a data race.
 14. `FormatAuthError` **MUST NOT** instruct the caller to add a new account as the primary recovery step. The guidance **MUST** name `account.login` for re-authenticating an existing account.
@@ -201,6 +202,9 @@ Behaviour that *does* change for existing users, without requiring re-authentica
 | `internal/auth/pending.go` *(new)* | `pendingAuthAttempt` and the race-free state helpers `begin`, `settle`, `pendingOutcome`. |
 | `internal/auth/account_slot.go` *(new)* | Mutable per-request `accountAuthSlot` and `resolvedAccountAuth`. |
 | `internal/auth/recovery_ops.go` *(new)* | `isRecoveryOperation`. |
+| `internal/auth/inflight.go` *(new)* | Process-wide interactive-auth in-flight counter. |
+| `internal/auth/email_resolver.go` | `EnsureEmail` skips while a sign-in holds the credential lock. |
+| `internal/tools/refresh_account.go` | Declines with an explanation instead of blocking on the credential. |
 | `internal/auth/devicecode_prompt.go` *(new)* | `DeviceCodePrompt` and `SignInURL`. |
 | `internal/auth/devicecode_present.go` *(new)* | URL-mode presentation (link + code), acknowledgement wait, verbatim fallback. |
 | `internal/auth/middleware.go` | Entry-point restructure, silent attempt, slot install, pending rework, background deadlines on both interactive flows; `presentDeviceCode` moved out. |
@@ -327,6 +331,47 @@ Remove the `if` in `buildSystemVerbs`; move `completeAuthVerb` into the base sli
 
 Add `pending.go` (`pendingAuthAttempt`, `begin`, `settle`, `pendingOutcome`, `backgroundAuthTimeout`) and `recovery_ops.go` (`isRecoveryOperation`). Restructure the middleware entry point. Bound both the device code and the browser background auth contexts at `backgroundAuthTimeout` (300s); both previously ran on an unbounded `context.Background()`.
 
+#### The exemption alone did not work — live finding, 2026-09-02
+
+The first implementation of A4 exempted the `account` domain from the pending-auth gate and was assumed to be sufficient. It was not. Against a sandboxed device_code server with a cold credential and a client that answers elicitation with "Method not found":
+
+| Step | Result |
+|---|---|
+| `mail.list_folders` on the cold credential | returns the device code text; `pendingAuth` now true |
+| `account.list` while pending | **timed out after 60s — no response at all** |
+| `system.status` while pending | returns immediately (not `authMW`-wrapped, proving the server was alive) |
+
+That is strictly worse than the pre-A4 behaviour it replaced, where the verb at least returned a message.
+
+**The exemption was not the fault.** Instrumenting the real middleware showed `Params.Name == "account"`, `isRecoveryOperation() == true`, and the inner handler running. The call got through; it hung afterwards.
+
+**Root cause: azidentity's per-client mutex.** `publicClient.client()` returns a shared `*sync.Mutex` (`caeMu` or `noCAEMu`), and *both* `Authenticate` and `GetToken` take it (`public_client.go`). An interactive `Authenticate` therefore holds it for the entire sign-in — up to `backgroundAuthTimeout`. It is a plain `sync.Mutex`, so **it is not context-aware**: a caller that passes a short context to a Graph call does not get a short bound, it waits for the mutex however long that takes.
+
+Reproduced per verb against the real `AuthMiddleware`:
+
+| Verb | Behaviour while a sign-in is pending | Why |
+|---|---|---|
+| `account.list` | **hung** | `EnsureEmail` → Graph `/me` → `GetToken` on the shared credential |
+| `account.refresh` | **hung** | `entry.Credential.GetToken` on the shared credential |
+| `account.login` | fine | `setupCredential` builds a *new* credential with its own mutex |
+
+`account.refresh` hanging is the sharpest edge, because A5's guidance names it as a recovery step.
+
+#### Fix
+
+Bounding the calls is not available: abandoning a goroutine blocked on a non-context-aware mutex leaves it to write `entry.Email` later, racing every reader. The workable answer is not to make the call at all while the lock is held.
+
+`internal/auth/inflight.go` adds a process-wide counter of running interactive flows. The middleware brackets both background goroutines with `BeginInteractiveAuth`/`EndInteractiveAuth`, and the two blocking call sites consult it:
+
+* `EnsureEmail` returns early. The address only enriches a display string and resolves on a later call, so skipping costs nothing that matters.
+* `account.refresh` declines with an explanation rather than refreshing. A refresh is pointless while the flow that is about to mint a fresh token is still running, so this is the honest answer rather than a degradation.
+
+The signal is process-wide rather than per-credential. During a sign-in the user is already being prompted, so briefly skipping best-effort enrichment for every account is a good trade against ever hanging a recovery verb.
+
+#### Considered and not done
+
+Removing `authMW` from the account verbs entirely, so they behave like `system.status`. This is arguably the cleaner long-term shape — those verbs manage their own authentication and gain nothing from the middleware — but it **would not have fixed this bug**, because the hang was inside the handler, past the middleware. Doing it now would also drop auth-error detection on account verb results for no benefit. Recorded as a possible follow-up, not folded in.
+
 ### A5: Correct the recovery guidance
 
 Add `FormatAuthErrorFor` and `recoverySteps`; keep `FormatAuthError` as the method-agnostic wrapper. Replace the substring test in `classifyAuthError` with `authRequiredDetail`. Pass the resolved method at each middleware call site.
@@ -364,6 +409,8 @@ The `otc` parameter is retained in `SignInURL` because it is the documented deep
 * `internal/auth/silent_test.go` — nil credential; successful and failing silent acquisition; **the escalating credential is never probed**; `*AuthCodeCredential` satisfies `SilentTokenCredential`.
 * `internal/auth/devicecode_prompt_test.go` — field round trip; `SignInURL` with and without a user code, with and without a verification URL, with pre-existing query parameters; `deviceCodeElicitMessage` quotes the code and never claims pre-filling.
 * `internal/auth/recovery_ops_test.go` — domain classification.
+* `internal/auth/recovery_reachable_test.go` — the A4 regression suite: a recovery verb reaches its handler AND returns within two seconds while a sign-in holds the credential lock (verified to fail against the unfixed code); `EnsureEmail` skips rather than blocks; the in-flight counter nests.
+* `internal/tools/refresh_account_test.go` — `account_refresh` declines promptly and never calls `GetToken` while a sign-in is outstanding.
 * `internal/auth/middleware_cr0067_test.go` — pending auth blocks an ordinary verb but allows an `account` verb; a fresh credential allows an `account` verb without starting a flow; a successful silent refresh skips the prompt on both paths; `AccountResolver` hands the account back so re-auth targets it; `inferAuthMethod` per entry shape; `pendingOutcome` transitions; classification preserves device code detail; method-specific recovery steps never mention `operation="add"`.
 * `internal/tools/complete_auth_test.go` — table-driven unavailability message per method.
 * `internal/auth/silent_test.go` — `TestSetupCredential_GetTokenIsSilentOnly` (both azidentity methods yield `AuthenticationRequiredError`, are recognised by `IsAuthError`, and are probe-eligible); `TestSilentOnlyAcquirer_Eligibility`; `TestClassifyAuthError_AuthenticationRequiredError`.
@@ -394,9 +441,9 @@ A probe-eligible credential with a warm cache causes the original tool call to b
 
 `system.complete_auth` appears in the registry under every auth method. Called against a `browser` account it names the browser recovery path; against `device_code`, the device login page; with no known method, `system.status` plus `account.login`. The aggregate `system` annotations are unchanged.
 
-### AC-4: Recovery stays reachable and pending state self-clears
+### AC-4: Recovery stays reachable, responsive, and pending state self-clears
 
-With a pending flow, a `calendar` call returns the pending message and an `account` call runs. With a cold credential, an `account` call runs without triggering authentication. The device code background context carries a 300s deadline. `go test -race ./...` is clean.
+With a pending flow, a `calendar` call returns the pending message and an `account` call runs. With a cold credential, an `account` call runs without triggering authentication. Critically, an `account` call that reaches its handler **returns within two seconds** rather than blocking for the duration of the sign-in: `account.list` skips its address lookup and `account.refresh` declines with an explanation. Both background auth contexts carry a 300s deadline. `go test -race ./...` is clean.
 
 ### AC-5: Guidance is correct and method-aware
 
@@ -441,6 +488,10 @@ Per the AGENTS.md documentation governance rules: per-verb reference for `comple
 ### Risk 3a: `DisableAutomaticAuthentication` changes Graph SDK behaviour for existing `browser` and `device_code` users
 
 **Mitigation:** The change is a strict improvement in this architecture. Previously the Graph SDK's bearer-token policy could open a browser window or emit a device code in the middle of an unrelated tool call, outside any middleware coordination. Now it returns an error that `IsAuthError` recognises and `AuthMiddleware` turns into a coordinated, user-visible prompt — the designed path since CR-0022. The deliberate interactive flows are untouched because `Authenticate()` bypasses the option. `TestSetupCredential_GetTokenIsSilentOnly` pins the option; the existing browser and device code middleware tests pin the interactive flows.
+
+### Risk 3b: An exempted verb acquires a new blocking dependency
+
+**Mitigation:** The exemption's value depends on the handler returning promptly, which is not something the middleware can enforce. `TestRecoveryVerbsStayResponsiveDuringAuth` drives the real `AuthMiddleware` with a credential that models azidentity's shared, non-context-aware mutex and asserts a two-second bound, so a future handler that starts touching the credential fails the build rather than reintroducing the hang. The test was verified to fail against the unfixed code.
 
 ### Risk 4: Exempting the `account` domain weakens a safety property
 

@@ -228,6 +228,11 @@ Call `{tool: "calendar", args: {operation: "update_event", ...}}` with:
 | `show_as`        | `busy`                             |
 | `body`           | `<h2>Agenda</h2><ol><li>Verify CRUD operations</li><li>Review test results</li></ol>` |
 
+> **Send the `body` value with literal `<` and `>` characters.** Do NOT HTML-escape it — do not send
+> `&lt;h2&gt;`. The server infers the Graph body content type by looking for a literal `<`, so an escaped
+> string is stored as plain text and Step 10b will fail with entity-encoded content. This is a real
+> failure mode: run `2026-09-02T13-48-00` failed 10a and 10b for exactly this reason.
+
 - **Pass:** Response is a plain text confirmation containing `Event updated:` and the event subject.
 
 ### Step 10 -- Get updated event and verify body escalation
@@ -251,6 +256,8 @@ Call `{tool: "calendar", args: {operation: "update_event", ...}}` with:
 - **Verify:** The `bodyPreview` field is also present as a plain-text snippet.
 - **Purpose:** This confirms the body escalation pattern — `bodyPreview` in default text mode is sufficient to determine whether the full HTML body retrieval via `output=raw` is needed.
 - **Fail:** If the full HTML body is not present in raw mode, or if the text default in Step 10a leaked HTML tags.
+- **If `body.content` contains `&lt;h2&gt;` rather than `<h2>`:** the body was HTML-escaped before being sent
+  in Step 9, not a server defect. Re-send Step 9 with literal angle brackets before recording a failure.
 
 ### Step 11 -- Get free/busy
 

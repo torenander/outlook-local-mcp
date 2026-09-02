@@ -13,7 +13,10 @@ Step-by-step instruction for Claude Code to exercise the MCP tools through a com
 
 - The MCP server `outlookCalendar` is running and connected.
 - At least one account is authenticated (verify with `{tool: "account", args: {operation: "list"}}`).
-- The server **must** be configured with `LOG_LEVEL=debug` and file logging enabled (`LOG_FILE` set). Both are verified in Step 0.
+- The server **must** be configured with `LOG_LEVEL=debug`, file logging enabled (`LOG_FILE` set), and
+  `AUDIT_LOG_PATH` set. All three are verified in Step 0. Note that audit entries go to a **separate sink**
+  from the slog output: `LOG_FILE` receives DEBUG/INFO entries, `AUDIT_LOG_PATH` receives the `"audit":true`
+  records. Setting only `LOG_FILE` leaves Step 26 unsatisfiable because no audit records are written there.
 
 ## Non-interactive mode (CR-0064 Phase 3)
 
@@ -96,6 +99,9 @@ Treat the following as a user question that you must answer using only the in-se
 - **Record:** `config.logging.log_format` as the **log format**.
 - **Record:** `config.logging.log_sanitize` as the **PII sanitization** setting.
 - **Record:** `config.logging.audit_log_enabled` as the **audit logging** setting.
+- **Verify:** `config.logging.audit_log_enabled` is `true`. If not, stop and ask the user to set `AUDIT_LOG_ENABLED=true`.
+- **Verify:** `config.logging.audit_log_path` is a non-empty string. Record it as the **audit log path** for Step 26.
+  If empty, stop and ask the user to set `AUDIT_LOG_PATH` — audit records are not written to `LOG_FILE`.
 - **Record:** `config.identity.auth_method` and `config.identity.auth_method_source` as the **auth method** and its **source**.
 - **Record:** `config.identity.client_id` and `config.identity.tenant_id` as the **identity config**.
 - **Record:** `config.storage.token_cache_backend` (either `"keychain"` or `"file"`) as the **auth cache type**.
@@ -440,7 +446,9 @@ Call `{tool: "calendar", args: {operation: "get_event", event_id: "<saved Teams 
 
 ### Step 26 -- Verify server logs
 
-Read the **log file path** recorded in Step 0c. Inspect the log entries emitted during the test (from Step 1 onward).
+Read the **log file path** and the **audit log path** recorded in Step 0c. Inspect the entries emitted during
+the test (from Step 1 onward). DEBUG/INFO "tool called" / "tool completed" entries are in the **log file**;
+every `"audit":true` record below is in the **audit log**. They are different files.
 
 - **Verify:** Every tool call has a `DEBUG`-level entry at the start of the operation and an `INFO`-level (or `ERROR` for Steps 15, 23, 25) "tool completed" entry. The DEBUG entry may be the generic `"tool called"` (read verbs and `create_event`, `create_meeting`, `update_event`) or a domain-specific message (`"rescheduling event"`, `"deleting event"`, `"responding to event"`, `"cancelling event"`); both forms satisfy this check.
 - **Verify:** The `calendar.create_event` audit entry includes the event ID.

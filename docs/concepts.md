@@ -10,9 +10,33 @@ All read tools accept an `output` parameter with three modes. Write tools return
 
 **`summary`** returns compact JSON with a deliberately curated field set per tool. Useful when the LLM needs structured data for programmatic reasoning. Nested objects are flattened: start/end become plain dateTime strings, organizer becomes a name string. Summary mode includes a `displayTime` field with a pre-formatted human-readable time string.
 
-**`raw`** returns the full, unmodified Graph API serialisation including empty values. Use this when you need HTML body content, recurrence patterns, attendee email addresses, or other detailed fields. `raw` is never the default; it must be requested explicitly.
+**`raw`** returns the full, unmodified Graph API serialisation including empty values. Use this when you need recurrence patterns, attendee email addresses, internet message headers, or other detailed fields. `raw` is never the default; it must be requested explicitly.
 
 Invalid values return an error: `output must be 'summary', 'raw', or 'text'`.
+
+There are exactly three tiers and there will not be a fourth. A question about *how much of a mail body* to return is a separate axis, answered by `body_mode` — see the next section.
+
+## Message body modes
+
+`mail.get_message` and `mail.get_conversation` accept a `body_mode` parameter alongside `output`. The two are independent: `output` decides the shape of the response, `body_mode` decides how much of the message body that shape carries and in what form. Any combination is valid.
+
+| `body_mode` | What you get | What it costs |
+|---|---|---|
+| `preview` (default) | Graph's `bodyPreview`: the first 255 characters, whitespace-normalised, no markup | Nothing beyond the previous behaviour |
+| `text` | The complete body converted to plain text **by Microsoft Graph** | The length of the message, with no markup overhead |
+| `full` | The complete body exactly as stored, which for most modern mail is HTML | The length of the message plus its inline styles |
+
+`preview` is the default so that reading a message stays cheap. In `text` output a preview that was cut at the cap says so in band, so a message that stops mid-sentence is never mistaken for a short message.
+
+`text` mode sends the `Prefer: outlook.body-content-type="text"` request header, so the HTML-to-text conversion happens on Microsoft's side. This server never parses, strips, or sanitises HTML, and carries no dependency that could.
+
+`full` returns the same HTML body that `output=raw` has always returned, but on its own — without `internetMessageHeaders`, `conversationIndex`, `replyTo` and `bccRecipients`. Use `output=raw` when you actually want those fields; use `body_mode=full` when you only wanted the body.
+
+`output=raw` still returns the whole body regardless of `body_mode`, because raw is by definition the complete Graph serialisation. On that tier `body_mode` only chooses the body's content type: `text` converts it, `preview` and `full` leave it as stored.
+
+Only these two verbs take `body_mode`. `list_messages` and `search_messages` do not: returning 25 whole bodies from a browse is precisely what the output tiering exists to prevent, and any result from those verbs already carries the message ID needed to escalate one specific message with `get_message`.
+
+The parameter is spelled `body_mode` rather than `body` because the `mail` tool is one aggregate tool whose input schema is the union of its verbs' parameters, and `create_draft`/`update_draft` already use `body` for draft content. Plain `body` is accepted as an alias at call time.
 
 ## Multi-account model and UPN identity
 

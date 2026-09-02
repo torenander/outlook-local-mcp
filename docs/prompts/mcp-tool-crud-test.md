@@ -559,6 +559,34 @@ Call `{tool: "mail", args: {operation: "list_messages", ...}}` five times with t
 - **Verify:** `folder` accepts a folder name, not just a Graph ID. If the 30e count equals the unscoped total across all folders, the scope was ignored.
 - **Fail:** If any call returns an error or ignores the filter.
 
+### Step 30g -- Message body modes (CR-0068)
+
+Pick a message whose body is clearly longer than 255 characters. From the Step 30e listing take the message ID of a long message and record it as **long message ID**. If the Inbox holds no message longer than a preview, record Step 30g as SKIP and say so in the Comment column.
+
+Call `{tool: "mail", args: {operation: "get_message", message_id: "<long message ID>"}}` four times, once per row:
+
+| Call | Parameters                     | Expected                                                                                     |
+|------|--------------------------------|----------------------------------------------------------------------------------------------|
+| i    | (none — default)               | Body stops at 255 characters and is followed by `[preview truncated at 255 characters — ...]` |
+| ii   | `body_mode: "text"`            | Complete body, plain text, **no** HTML tags, no truncation marker, no internet headers        |
+| iii  | `body_mode: "full"`            | Complete body **with** HTML markup, and still no `internetMessageHeaders` block               |
+| iv   | `body: "text"`                 | Identical body to call ii (`body` is an accepted alias for `body_mode`)                       |
+
+- **Verify:** Call i is byte-for-byte the pre-CR-0068 default output apart from the added truncation marker. The marker must **not** appear on a message whose body is shorter than the cap.
+- **Verify:** Call ii returns markedly more text than call i and contains no `<` tags. This is the whole point of the CR: a full body that costs no more than the body itself.
+- **Verify:** Call iii contains HTML tags. Compare its length against `{operation: "get_message", message_id: "<long message ID>", output: "raw"}` — raw must be materially larger, because it adds every internet header on top of the same body.
+- **Verify:** `{operation: "get_message", message_id: "<long message ID>", body_mode: "bogus"}` returns the error `body_mode must be 'preview', 'text', or 'full'`.
+- **Verify:** `body_mode` composes with `output`. `{..., body_mode: "text", output: "summary"}` returns JSON containing a `body` object whose `contentType` is `text` and whose `content` is the full plain-text body.
+- **Fail:** If call ii returns HTML, if any call returns only the preview, or if the default (call i) returns more than the preview.
+
+### Step 35b -- Conversation body modes (CR-0068)
+
+Run after Step 35, reusing its **conversation ID**. Call `{tool: "mail", args: {operation: "get_conversation", conversation_id: "<conversation ID>", body_mode: "text"}}`.
+
+- **Verify:** Every message in the thread shows a `Body:` block with its full plain-text body instead of a `Preview:` line.
+- **Verify:** The default Step 35 call marks truncated previews with `[...]` and prints the escalation hint **once** in the footer, not once per message.
+- **Fail:** If bodies are still truncated, if HTML appears, or if the hint repeats per message.
+
 ### Step 31 -- Create draft (skip if mail management disabled)
 
 If `config.features.mail_manage_enabled` from Step 0c is `false`, **skip** Steps 31 through 35 and record them as SKIP.
@@ -774,11 +802,13 @@ After all steps, print a summary table. Every row **MUST** include a short `Comm
 | 30d  | Mail list provenance filter       | PASS/FAIL/SKIP | e.g., "provenance filter returned 0 MCP messages"        |
 | 30e  | Mail list baseline                | PASS/FAIL/SKIP | e.g., "baseline count recorded"                          |
 | 30f  | Mail list folder_id alias         | PASS/FAIL/SKIP | e.g., "alias count matches folder: baseline"             |
+| 30g  | Message body modes                | PASS/FAIL/SKIP | e.g., "preview marked truncated, text plain, full HTML"  |
 | 31   | Create mail draft                 | PASS/FAIL/SKIP | e.g., "draft id returned"                                |
 | 32   | Update mail draft                 | PASS/FAIL/SKIP | e.g., "subject updated"                                  |
 | 33   | Create reply draft                | PASS/FAIL/SKIP | e.g., "reply draft created"                              |
 | 34   | Delete drafts                     | PASS/FAIL/SKIP | e.g., "both drafts deleted, 404 on re-fetch"             |
 | 35   | Get conversation                  | PASS/FAIL/SKIP | e.g., "thread returned in chronological order"           |
+| 35b  | Conversation body modes           | PASS/FAIL/SKIP | e.g., "full plain-text bodies, hint printed once"        |
 | 36   | Get attachment                    | PASS/FAIL/SKIP | e.g., "metadata + base64 under size limit"               |
 | 37   | Create top-level folder           | PASS/FAIL/SKIP | e.g., "MCP-Test-Folder created with ID"                  |
 | 38   | Create nested folder by name      | PASS/FAIL/SKIP | e.g., "MCP-Test-Subfolder created via parent name"       |

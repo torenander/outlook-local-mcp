@@ -5,7 +5,9 @@
 // messages in an email conversation thread in chronological order via the
 // Microsoft Graph API. The caller may supply either a message_id (from which
 // the conversationId is resolved) or a conversation_id directly. Results are
-// returned using the three-tier output model (text/summary/raw).
+// returned using the three-tier output model (text/summary/raw), with the
+// orthogonal body_mode parameter (CR-0068) selecting whether each message
+// carries a preview, a full plain-text body, or the full stored body.
 package tools
 
 import (
@@ -35,11 +37,12 @@ import (
 //   - max_results: optional maximum number of messages (default 50, max 100).
 //   - account: optional account label for multi-account selection.
 //   - output: optional output mode (text/summary/raw).
+//   - body_mode: optional body delivery mode (preview/text/full).
 //
 // Returns the configured mcp.Tool ready for registration with server.AddTool.
 func NewGetConversationTool() mcp.Tool {
 	return mcp.NewTool("mail_get_conversation",
-		mcp.WithDescription("Retrieve all messages in an email conversation thread in chronological order. Useful for understanding historical context before drafting a response. Supply either message_id (conversationId will be resolved) or conversation_id directly."),
+		mcp.WithDescription("Retrieve all messages in an email conversation thread in chronological order. Useful for understanding historical context before drafting a response. Supply either message_id (conversationId will be resolved) or conversation_id directly. Each message carries a 255-character preview by default; body_mode=text returns every full body as plain text."),
 		mcp.WithTitleAnnotation("Get Email Conversation"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -63,6 +66,10 @@ func NewGetConversationTool() mcp.Tool {
 			mcp.Description("Output mode: 'text' (default) returns chronological plain-text thread, 'summary' returns compact JSON, 'raw' returns full Graph API fields per message."),
 			mcp.Enum("text", "summary", "raw"),
 		),
+		mcp.WithString(bodyModeParam,
+			mcp.Description("Body delivery per message: 'preview' (default) returns the 255-character bodyPreview, 'text' returns each complete body converted to plain text by Graph, 'full' returns each complete body as stored (usually HTML)."),
+			mcp.Enum(BodyModePreview, BodyModeText, BodyModeFull),
+		),
 	)
 }
 
@@ -72,6 +79,15 @@ var conversationSummarySelectFields = []string{
 	"receivedDateTime", "importance", "isRead", "hasAttachments",
 	"conversationId", "webLink", "categories", "flag",
 }
+
+// conversationSummaryWithBodySelectFields is conversationSummarySelectFields
+// plus `body`, used when the caller escalates body_mode past "preview" while
+// staying in the text or summary tier. A thread is the worst case for the
+// old escalation path — output=raw multiplied every full body by a full
+// internetMessageHeaders block — so the body is added to the summary set
+// instead of pushing the caller onto the raw field set (CR-0068).
+var conversationSummaryWithBodySelectFields = append(
+	append([]string{}, conversationSummarySelectFields...), "body")
 
 // conversationFullSelectFields defines $select fields for raw mode.
 var conversationFullSelectFields = []string{
@@ -114,6 +130,12 @@ func NewHandleGetConversation(retryCfg graph.RetryConfig, timeout time.Duration,
 		}
 
 		outputMode, err := ValidateOutputMode(request)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		// Body delivery mode is orthogonal to the output tier; see body_mode.go.
+		bodyMode, err := ValidateBodyMode(request)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -173,11 +195,14 @@ func NewHandleGetConversation(retryCfg graph.RetryConfig, timeout time.Duration,
 			}
 		}
 
-		logger.Debug("tool called", "message_id", messageID, "conversation_id", conversationID, "max_results", maxResults, "output", outputMode)
+		logger.Debug("tool called", "message_id", messageID, "conversation_id", conversationID, "max_results", maxResults, "output", outputMode, "body_mode", bodyMode)
 
 		selectFields := conversationSummarySelectFields
-		if outputMode == "raw" {
+		switch {
+		case outputMode == "raw":
 			selectFields = conversationFullSelectFields
+		case bodyMode != BodyModePreview:
+			selectFields = conversationSummaryWithBodySelectFields
 		}
 		filter := fmt.Sprintf("conversationId eq '%s'", conversationID)
 		top := int32(maxResults)
@@ -193,6 +218,13 @@ func NewHandleGetConversation(retryCfg graph.RetryConfig, timeout time.Duration,
 			qp.Expand = []string{graph.ProvenanceExpandFilter(provenancePropertyID)}
 		}
 		cfg := &users.ItemMessagesRequestBuilderGetRequestConfiguration{QueryParameters: qp}
+		// body_mode=text is served by Graph, not by local HTML stripping. This
+		// verb sends no other request preference, but the header is still built
+		// through newPreferHeaders so any preference added later is combined
+		// into one Prefer value rather than emitted as a second header line.
+		if headers := newPreferHeaders(bodyContentTypePreference(bodyMode)); headers != nil {
+			cfg.Headers = headers
+		}
 
 		timeoutCtx, cancel := graph.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -220,12 +252,25 @@ func NewHandleGetConversation(retryCfg graph.RetryConfig, timeout time.Duration,
 			logger.Error("page iterator creation failed", "error", pErr.Error())
 			return mcp.NewToolResultError(fmt.Sprintf("failed to create page iterator: %s", pErr.Error())), nil
 		}
+		// Carry the body-content-type preference onto follow-up page requests.
+		// Without this a thread that spans pages would return plain text for the
+		// first page and HTML for the rest.
+		if headers := newPreferHeaders(bodyContentTypePreference(bodyMode)); headers != nil {
+			pageIterator.SetHeaders(headers)
+		}
 		iterErr := pageIterator.Iterate(ctx, func(msg models.Messageable) bool {
 			var m map[string]any
 			if outputMode == "raw" {
 				m = graph.SerializeMessage(msg)
 			} else {
 				m = graph.SerializeSummaryMessage(msg)
+				// Opt-in body on top of the curated summary field set; see
+				// graph.SerializeMessageBody.
+				if bodyMode != BodyModePreview {
+					if body := graph.SerializeMessageBody(msg); body != nil {
+						m["body"] = body
+					}
+				}
 			}
 			if provenancePropertyID != "" {
 				m["provenance"] = graph.HasMessageProvenanceTag(msg, provenancePropertyID)

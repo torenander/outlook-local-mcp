@@ -5,7 +5,9 @@
 // of a single email message by ID via the Microsoft Graph API. The response
 // includes all message fields: body content, all recipient fields (to, cc,
 // bcc), internet message headers, and attachment metadata. Output modes
-// (summary/raw) control the level of detail returned.
+// (summary/raw) control the level of detail returned, and the orthogonal
+// body_mode parameter (CR-0068) controls whether the message body is delivered
+// as a preview, as full plain text, or as the full stored (HTML) body.
 package tools
 
 import (
@@ -44,6 +46,15 @@ var getMessageSummarySelectFields = []string{
 	"conversationId", "webLink", "categories", "flag",
 }
 
+// getMessageSummaryWithBodySelectFields is the summary field set plus `body`.
+// It is used only when the caller escalates body_mode past "preview" while
+// staying in the text or summary tier: the point of CR-0068 is that a full body
+// no longer requires dragging in internetMessageHeaders, conversationIndex,
+// replyTo and bccRecipients, so the body is added to the summary set rather
+// than the caller being pushed onto the raw field set.
+var getMessageSummaryWithBodySelectFields = append(
+	append([]string{}, getMessageSummarySelectFields...), "body")
+
 // NewGetMessageTool creates the MCP tool definition for get_message. The tool
 // retrieves the full details of a single email message by its ID, including
 // body content, all recipient fields, internet message headers, and attachment
@@ -54,11 +65,12 @@ var getMessageSummarySelectFields = []string{
 //   - message_id: required unique identifier of the message to retrieve.
 //   - account: optional account label for multi-account selection.
 //   - output: optional output mode (summary/raw).
+//   - body_mode: optional body delivery mode (preview/text/full).
 //
 // Returns the configured mcp.Tool ready for registration with server.AddTool.
 func NewGetMessageTool() mcp.Tool {
 	return mcp.NewTool("mail_get_message",
-		mcp.WithDescription("Get full details of a single email message by its ID. Default output includes bodyPreview (plain-text snippet); full HTML body and headers are only available via output=raw."),
+		mcp.WithDescription("Get full details of a single email message by its ID. Default output includes bodyPreview (a snippet capped at 255 characters); use body_mode=text for the complete body as plain text, or body_mode=full for the complete body as stored (usually HTML)."),
 		mcp.WithTitleAnnotation("Get Email Message"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -74,6 +86,10 @@ func NewGetMessageTool() mcp.Tool {
 		mcp.WithString("output",
 			mcp.Description("Output mode: 'text' (default) shows body preview in plain text, 'summary' returns compact JSON with bodyPreview field, 'raw' returns full Graph API fields including full body with HTML content and headers."),
 			mcp.Enum("text", "summary", "raw"),
+		),
+		mcp.WithString(bodyModeParam,
+			mcp.Description("Body delivery: 'preview' (default) returns the 255-character bodyPreview, 'text' returns the complete body converted to plain text by Graph, 'full' returns the complete body as stored (usually HTML)."),
+			mcp.Enum(BodyModePreview, BodyModeText, BodyModeFull),
 		),
 	)
 }
@@ -115,15 +131,29 @@ func NewHandleGetMessage(retryCfg graph.RetryConfig, timeout time.Duration, prov
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
+		// Validate body delivery mode. This is orthogonal to the output tier:
+		// output picks the response shape, body_mode picks how much of the body
+		// that shape carries.
+		bodyMode, err := ValidateBodyMode(request)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
 		logger.Debug("tool called",
 			"message_id", messageID,
-			"output", outputMode)
+			"output", outputMode,
+			"body_mode", bodyMode)
 
-		// Select fields based on output mode. Text and summary use summary fields;
-		// raw uses the full field set.
+		// Select fields based on output mode. Text and summary use summary
+		// fields; raw uses the full field set. `body` is added to the summary
+		// set only when the caller escalated body_mode, so the default path
+		// never fetches a body it will not print.
 		selectFields := getMessageSummarySelectFields
-		if outputMode == "raw" {
+		switch {
+		case outputMode == "raw":
 			selectFields = getMessageFullSelectFields
+		case bodyMode != BodyModePreview:
+			selectFields = getMessageSummaryWithBodySelectFields
 		}
 
 		// Build request configuration. Add $expand for the provenance
@@ -137,6 +167,10 @@ func NewHandleGetMessage(retryCfg graph.RetryConfig, timeout time.Duration, prov
 				Select: selectFields,
 				Expand: expandFields,
 			},
+		}
+		// body_mode=text is served by Graph, not by local HTML stripping.
+		if headers := newPreferHeaders(bodyContentTypePreference(bodyMode)); headers != nil {
+			cfg.Headers = headers
 		}
 
 		timeoutCtx, cancel := graph.WithTimeout(ctx, timeout)
@@ -176,6 +210,15 @@ func NewHandleGetMessage(retryCfg graph.RetryConfig, timeout time.Duration, prov
 			result = graph.SerializeMessage(msg)
 		} else {
 			result = graph.SerializeSummaryMessage(msg)
+			// The summary field set deliberately excludes the body. When the
+			// caller escalated body_mode, attach it explicitly — an opt-in
+			// addition to the curated set, in the same manner as provenance
+			// below, rather than a change to what "summary" means.
+			if bodyMode != BodyModePreview {
+				if body := graph.SerializeMessageBody(msg); body != nil {
+					result["body"] = body
+				}
+			}
 		}
 
 		// Provenance: include a boolean indicating whether the message carries

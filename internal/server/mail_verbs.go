@@ -297,13 +297,23 @@ func buildListMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(st
 }
 
 // buildGetMessageVerb constructs the get_message Verb.
+//
+// CR-0068 adds `body_mode` here. It is a separate axis from `output`: `output`
+// picks the response shape, `body_mode` picks how much of the body that shape
+// carries and in what form. Adding a fourth output tier instead would have
+// forced every other verb to grow a mode it has no meaning for.
 func buildGetMessageVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
 	return tools.Verb{
 		Name:        "get_message",
-		Summary:     "get full message details by ID; bodyPreview by default, full body via output=raw",
-		Description: "Fetches full metadata for a single mail message by its ID. Text and summary output include a bodyPreview (first 255 characters). To read the complete HTML body and all headers, use output=raw. Use list_messages or search_messages to obtain a message ID.",
-		SeeDocs:     []string{"concepts#output-tiers"},
-		Handler:     wrap("mail.get_message", "read", tools.NewHandleGetMessage(rc, c.timeout, c.provenancePropertyID)),
+		Summary:     "get one message by ID; 255-char preview by default, full body via body_mode",
+		Description: "Fetches metadata for a single mail message by its ID. `body_mode` selects how the body arrives and is independent of `output`: 'preview' (the default) returns Graph's bodyPreview, capped at 255 characters and marked in text output when it was cut; 'text' returns the complete body converted to plain text by Microsoft Graph itself; 'full' returns the complete body exactly as stored, which for most mail is HTML. Neither escalation pulls in internetMessageHeaders, conversationIndex, replyTo or bccRecipients — `output=raw` still returns every Graph field, but it is no longer the only route to a whole body. The parameter is spelled `body_mode` because the mail tool's shared input schema already uses `body` for draft content; plain `body` is accepted as an alias at call time. Use list_messages or search_messages to obtain a message ID.",
+		Examples: []tools.Example{
+			{Args: map[string]any{"message_id": "AAMkAGI2TGULAAA="}, Comment: "metadata plus a 255-character preview — the cheapest read"},
+			{Args: map[string]any{"message_id": "AAMkAGI2TGULAAA=", "body_mode": "text"}, Comment: "the complete body as plain text, no headers, no HTML"},
+			{Args: map[string]any{"message_id": "AAMkAGI2TGULAAA=", "body_mode": "full", "output": "summary"}, Comment: "the complete HTML body as JSON, without the raw tier's header block"},
+		},
+		SeeDocs: []string{"concepts#output-tiers", "concepts#message-body-modes"},
+		Handler: wrap("mail.get_message", "read", tools.NewHandleGetMessage(rc, c.timeout, c.provenancePropertyID)),
 		Annotations: []mcp.ToolOption{
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithDestructiveHintAnnotation(false),
@@ -319,8 +329,12 @@ func buildGetMessageVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(stri
 				mcp.Description("Account label or UPN to use. Omit to auto-select the default account."),
 			),
 			mcp.WithString("output",
-				mcp.Description("Output mode: 'text' (default), 'summary', or 'raw' (includes full HTML body and headers)."),
+				mcp.Description("Output mode: 'text' (default), 'summary', or 'raw' (adds internet headers and every other Graph field)."),
 				mcp.Enum("text", "summary", "raw"),
+			),
+			mcp.WithString("body_mode",
+				mcp.Description("Body delivery, independent of output: 'preview' (default) is the 255-character bodyPreview, 'text' is the complete body as plain text, 'full' is the complete body as stored (usually HTML)."),
+				mcp.Enum("preview", "text", "full"),
 			),
 		},
 	}
@@ -373,13 +387,26 @@ func buildSearchMessagesVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(
 }
 
 // buildGetConversationVerb constructs the get_conversation Verb (MailEnabled-gated).
+//
+// This is the second and last verb to carry `body_mode`. A thread is the
+// worst case the parameter exists to fix — N previews of 255 characters, or N
+// full bodies each stapled to its own internetMessageHeaders block, with
+// nothing available in between. list_messages and search_messages deliberately
+// do not get it: returning 25 whole bodies is the outcome the output tiering
+// exists to prevent, and a caller who wants one of those bodies already has a
+// message ID to spend on get_message (CR-0068).
 func buildGetConversationVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func(string, string, mcpserver.ToolHandlerFunc) tools.Handler) tools.Verb {
 	return tools.Verb{
 		Name:        "get_conversation",
-		Summary:     "retrieve all messages in an email thread in chronological order",
-		Description: "Retrieves all messages that share a conversation thread in chronological order. Supply either a message_id (the server resolves the conversationId) or a conversation_id directly. Requires MAIL_ENABLED=true.",
-		SeeDocs:     []string{"concepts#mail-gating"},
-		Handler:     wrap("mail.get_conversation", "read", tools.NewHandleGetConversation(rc, c.timeout, c.provenancePropertyID)),
+		Summary:     "retrieve all thread messages chronologically; body_mode gives full bodies",
+		Description: "Retrieves all messages that share a conversation thread in chronological order. Supply either a message_id (the server resolves the conversationId) or a conversation_id directly. Each message carries a 255-character preview by default; `body_mode` escalates every message in the thread at once — 'text' for complete plain-text bodies converted by Microsoft Graph, 'full' for the complete stored bodies (usually HTML). Text output marks truncated previews and states the escalation once in the footer rather than per message. `body_mode` is independent of `output`, and plain `body` is accepted as an alias for it at call time. Requires MAIL_ENABLED=true.",
+		Examples: []tools.Example{
+			{Args: map[string]any{"message_id": "AAMkAGI2TGULAAA="}, Comment: "the thread with one 255-character preview per message"},
+			{Args: map[string]any{"conversation_id": "AAQkAGI2...", "body_mode": "text"}, Comment: "every message in the thread as full plain text"},
+			{Args: map[string]any{"message_id": "AAMkAGI2TGULAAA=", "body_mode": "text", "max_results": 5}, Comment: "cap the thread before escalating the bodies"},
+		},
+		SeeDocs: []string{"concepts#mail-gating", "concepts#message-body-modes"},
+		Handler: wrap("mail.get_conversation", "read", tools.NewHandleGetConversation(rc, c.timeout, c.provenancePropertyID)),
 		Annotations: []mcp.ToolOption{
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithDestructiveHintAnnotation(false),
@@ -404,6 +431,14 @@ func buildGetConversationVerb(c mailVerbsConfig, rc graph.RetryConfig, wrap func
 			mcp.WithString("output",
 				mcp.Description("Output mode: 'text' (default), 'summary', or 'raw'."),
 				mcp.Enum("text", "summary", "raw"),
+			),
+			// Declared here as well as on get_message. The aggregate union is
+			// first-verb-wins and get_message is an ungated read verb, so this
+			// costs zero schema bytes; it removes an invisible dependency on
+			// get_message staying registered (CR-0066 alias declaration rule).
+			mcp.WithString("body_mode",
+				mcp.Description("Body delivery, independent of output: 'preview' (default) is the 255-character bodyPreview, 'text' is the complete body as plain text, 'full' is the complete body as stored (usually HTML)."),
+				mcp.Enum("preview", "text", "full"),
 			),
 		},
 	}

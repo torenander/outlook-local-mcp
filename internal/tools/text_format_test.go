@@ -819,3 +819,135 @@ func TestFormatFolderTreeText_Singular(t *testing.T) {
 		t.Errorf("expected singular footer, got:\n%s", result)
 	}
 }
+
+// TestFormatMessageDetailText_FullBodyReplacesPreview verifies that when a
+// body_mode escalation attached a body, the detail view prints it instead of
+// the 255-character preview, and adds no truncation notice.
+func TestFormatMessageDetailText_FullBodyReplacesPreview(t *testing.T) {
+	message := map[string]any{
+		"subject":     "Long one",
+		"bodyPreview": strings.Repeat("a", 255),
+		"body":        map[string]string{"contentType": "text", "content": "The whole message."},
+	}
+
+	result := FormatMessageDetailText(message)
+
+	if !strings.Contains(result, "The whole message.") {
+		t.Errorf("full body missing from output:\n%s", result)
+	}
+	if strings.Contains(result, strings.Repeat("a", 255)) {
+		t.Errorf("preview printed alongside the full body:\n%s", result)
+	}
+	if strings.Contains(result, bodyPreviewTruncatedNotice) {
+		t.Errorf("truncation notice printed for an escalated body:\n%s", result)
+	}
+}
+
+// TestFormatMessageDetailText_FullBodyFromJSONRoundTrip verifies that a body
+// map that has been through JSON (map[string]any rather than map[string]string)
+// is read the same way, matching how recipient slices are already handled.
+func TestFormatMessageDetailText_FullBodyFromJSONRoundTrip(t *testing.T) {
+	message := map[string]any{
+		"subject": "Round trip",
+		"body":    map[string]any{"contentType": "html", "content": "<p>Marked up.</p>"},
+	}
+
+	if result := FormatMessageDetailText(message); !strings.Contains(result, "<p>Marked up.</p>") {
+		t.Errorf("body from a JSON round-trip was not printed:\n%s", result)
+	}
+}
+
+// TestFormatMessageDetailText_TruncatedPreviewIsMarked verifies the in-band
+// truncation marker: a preview at the cap is announced, a short one is not, and
+// an empty body map does not suppress the fallback.
+func TestFormatMessageDetailText_TruncatedPreviewIsMarked(t *testing.T) {
+	cases := []struct {
+		name        string
+		message     map[string]any
+		wantNotice  bool
+		wantPreview string
+	}{
+		{
+			name:        "preview at the cap is marked",
+			message:     map[string]any{"subject": "S", "bodyPreview": strings.Repeat("b", 255)},
+			wantNotice:  true,
+			wantPreview: strings.Repeat("b", 255),
+		},
+		{
+			name:        "short preview is not marked",
+			message:     map[string]any{"subject": "S", "bodyPreview": "all of it"},
+			wantNotice:  false,
+			wantPreview: "all of it",
+		},
+		{
+			name:        "empty body map falls back to the preview",
+			message:     map[string]any{"subject": "S", "bodyPreview": "all of it", "body": map[string]string{"contentType": "text", "content": ""}},
+			wantNotice:  false,
+			wantPreview: "all of it",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := FormatMessageDetailText(tc.message)
+			if !strings.Contains(result, tc.wantPreview) {
+				t.Errorf("preview missing from output:\n%s", result)
+			}
+			if got := strings.Contains(result, bodyPreviewTruncatedNotice); got != tc.wantNotice {
+				t.Errorf("truncation notice present = %v, want %v:\n%s", got, tc.wantNotice, result)
+			}
+		})
+	}
+}
+
+// TestFormatConversationText_FullBodies verifies that escalated thread entries
+// render a Body block rather than a Preview line, and that the footer hint is
+// absent when nothing was truncated.
+func TestFormatConversationText_FullBodies(t *testing.T) {
+	thread := map[string]any{
+		"conversationId": "c1",
+		"messages": []map[string]any{
+			{"subject": "First", "bodyPreview": "hi", "body": map[string]string{"content": "First whole body."}},
+			{"subject": "Second", "bodyPreview": "hello", "body": map[string]string{"content": "Second whole body."}},
+		},
+	}
+
+	result := FormatConversationText(thread)
+
+	for _, want := range []string{"First whole body.", "Second whole body."} {
+		if !strings.Contains(result, want) {
+			t.Errorf("thread output missing %q:\n%s", want, result)
+		}
+	}
+	if strings.Contains(result, "Preview:") {
+		t.Errorf("thread rendered a preview line despite full bodies:\n%s", result)
+	}
+	if strings.Contains(result, conversationPreviewTruncatedHint) {
+		t.Errorf("truncation hint printed when nothing was truncated:\n%s", result)
+	}
+}
+
+// TestFormatConversationText_MixedTruncation verifies that only truncated
+// entries get the compact marker while the actionable hint is printed once for
+// the whole thread.
+func TestFormatConversationText_MixedTruncation(t *testing.T) {
+	thread := map[string]any{
+		"conversationId": "c1",
+		"messages": []map[string]any{
+			{"subject": "Short", "bodyPreview": "brief"},
+			{"subject": "Long", "bodyPreview": strings.Repeat("c", 255)},
+		},
+	}
+
+	result := FormatConversationText(thread)
+
+	if got := strings.Count(result, conversationPreviewEllipsis+"\n"); got != 1 {
+		t.Errorf("ellipsis marker ends %d preview lines, want 1", got)
+	}
+	if got := strings.Count(result, conversationPreviewTruncatedHint); got != 1 {
+		t.Errorf("escalation hint appears %d times, want exactly 1", got)
+	}
+	if !strings.Contains(result, "Preview: brief\n") {
+		t.Errorf("short preview was altered:\n%s", result)
+	}
+}

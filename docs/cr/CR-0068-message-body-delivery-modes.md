@@ -41,13 +41,28 @@ What the doctrine never decided is **what form the escalated body takes**. It an
 
 So the only route to a complete body costs several times what the body itself costs. That is not a bug in the tiering; it is a gap the tiering was never asked to fill.
 
+Measured against a live Microsoft 365 mailbox on 2026-09-02, one real HTML message read four ways:
+
+| Mode | Response chars | ~tokens (4 chars/token) | vs `output=raw` |
+|---|---|---|---|
+| `preview` (default) | 536 | 134 | — |
+| `body_mode=text` | 3,559 | 889 | **5.2× cheaper** |
+| `body_mode=full` | 5,585 | 1,396 | 3.3× cheaper |
+| `output=raw` | 18,409 | 4,602 | — |
+
+The `full` row is the stronger half of the argument: even keeping the HTML exactly as stored, dropping the internet-header bundle alone saves 3.3×. The `text` row is what the common case — "read me this email" — actually costs once the markup goes too.
+
 ### The silent part
 
 On the preview path, `FormatMessageDetailText` prints `bodyPreview` and stops. A message cut at 255 characters is textually indistinguishable from a message that is 200 characters long. The reader cannot tell that anything is missing, and before this CR there was no parameter to ask for the rest even if they could. Marking the truncation is cheap and worth doing on its own merits; it is included here because this CR is what gives the marker something to point at.
 
 ### Why Graph does the conversion
 
-`Prefer: outlook.body-content-type` has **zero** occurrences in the repository. Microsoft Graph will return `body.content` already converted to plain text when asked, and this server has never asked. Doing the conversion locally would mean an HTML parser in a security-reviewed codebase whose CR-0019 explicitly declines responsibility for HTML sanitization. Asking Graph costs one request header.
+`Prefer: outlook.body-content-type` had **zero** occurrences in the repository. Microsoft Graph will return `body.content` already converted to plain text when asked, and this server had never asked. Doing the conversion locally would mean an HTML parser in a security-reviewed codebase whose CR-0019 explicitly declines responsibility for HTML sanitization. Asking Graph costs one request header.
+
+Confirmed live on 2026-09-02: Graph honours the header. A real HTML email returned as server-converted plain text, with no tags and no inline styles. See "Live verification".
+
+**Caveat: plain text is not uniformly small.** Graph's conversion preserves URLs inline and fully expanded, including SafeLinks rewrites. On the message measured above — a GitHub notification — a single link renders as roughly 500 characters of `https://eur03.safelinks.protection.outlook.com/?url=...&data=...&sdata=...`. So for link-heavy mail the saving comes from dropping markup and headers, not from shrinking URLs, and a reader should not expect `text` to be proportional to the prose they can see. 889 tokens against 4,602 is still decisive, so this does not change the design — but it is the reason the win on some messages will be nearer 3× than 5×.
 
 ## Change Drivers
 
@@ -90,7 +105,9 @@ More fundamentally the two are different questions. `output` asks *what shape is
 
 The obvious name is taken, and taking it back would break drafts.
 
-The `mail` tool's input schema is the union of its verbs' parameters. `create_draft` and `update_draft` already declare `body` as a free-text string for draft content. `aggregateSchemaOptions` resolves duplicate names **first-verb-wins**, and `get_message` is registered before the draft verbs. Declaring `body` on `get_message` with an enum would therefore publish, for the whole `mail` tool:
+The `mail` tool's input schema is the union of its verbs' parameters. `create_draft` and `update_draft` already declare `body` as a free-text string for draft content. `aggregateSchemaOptions` resolves duplicate names **first-verb-wins**, and `get_message` is registered before the draft verbs.
+
+The ordering was **confirmed against the registry, not inferred**. In `internal/server/mail_verbs.go`: `buildGetMessageVerb` is appended at line 122, `create_draft` declares `body` at line 541 and `update_draft` at line 653. `get_message` wins. Declaring `body` on it with an enum would therefore publish, for the whole `mail` tool:
 
 ```json
 "body": {"type":"string",
@@ -206,7 +223,7 @@ So two `Add` calls produce two `Prefer:` lines in non-deterministic order rather
 
 ### User Impact
 
-* Reading a whole email costs roughly the length of the email, instead of the length of its HTML plus a header block.
+* Reading a whole email costs roughly the length of the email, instead of the length of its HTML plus a header block. Measured live at 5.2× cheaper than `output=raw` for `text` and 3.3× for `full`.
 * A truncated preview is now visibly truncated and names the parameter that completes it.
 * A whole thread can be read in one call at prose cost.
 * No existing call changes behaviour. Every response to a request that omits `body_mode` is unchanged except for the truncation marker.
@@ -316,6 +333,26 @@ And the prohibition is recorded in AGENTS.md
 
 Then `go.mod` and `go.sum` are unchanged and `make tidy` is clean
 
+## Live verification
+
+Performed 2026-09-02 by the requestor against a live Microsoft 365 mailbox. The automated suite is entirely mocked, so these are the claims that only a real account could settle.
+
+### Verified
+
+1. **Graph honours `Prefer: outlook.body-content-type="text"`.** `body_mode=text` against a real HTML email returned the complete body as server-converted plain text — no tags, no inline styles. This was the single assumption the whole CR rested on; it is now evidence rather than a premise. (AC-2.)
+2. **The truncation marker fires correctly**, emitting `[preview truncated at 255 characters — pass body_mode="text" for the full plain-text body]` on a real over-cap message. (AC-5.)
+3. **The token delta is measured**, not argued — see the table under "What the doctrine decided, and what it did not". `text` is 5.2× cheaper than `output=raw` on the same message and `full` is 3.3× cheaper, the latter purely from dropping the internet-header bundle.
+4. **The `body` parameter-name collision is real**, not hypothetical. Registration order confirmed at `mail_verbs.go:122` (`get_message`), `:541` (`create_draft` `body`) and `:653` (`update_draft` `body`). First-verb-wins would have published a body-mode enum as the draft `body` parameter for every caller of the `mail` tool. See "Why the parameter is not called `body`".
+5. **Gates reproduce independently:** clean build, `go test -race ./...` 14/14, and lint reporting exactly the two pre-existing `QF1012` findings — neither introduced by this CR, both already fixed on the CR-0067 branch and inherited on merge.
+
+### Still outstanding
+
+These were not tested and are not softened by the above:
+
+* Whether a `bodyPreview` that is exactly 255 characters **and complete** exists in practice, which is the one case the length heuristic marks wrongly.
+* Whether Graph accepts `$select`-plus-`Prefer` on the conversation query, which already carries one Graph quirk (`$orderby` rejected as `InefficientFilter` on a `conversationId` filter).
+* Whether the undeclared `body` alias survives a real MCP client's argument forwarding end to end. CRUD Step 30g call iv covers it.
+
 ## Quality Standards Compliance
 
 - [x] All code compiles (`make build`)
@@ -328,14 +365,15 @@ Then `go.mod` and `go.sum` are unchanged and `make tidy` is clean
 - [x] New exported symbols have Go doc comments
 - [x] New logic follows the single-purpose-file convention
 - [x] Extension manifest updated
-- [ ] Live verification against a Microsoft 365 mailbox (CRUD Steps 30g and 35b) — **outstanding**, see Risks
+- [x] Live verification against a Microsoft 365 mailbox (2026-09-02) — Graph's plain-text conversion, the truncation marker and the token delta all confirmed; three narrower items remain untested, see "Live verification"
 
 ## Risks and Mitigation
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| Graph ignores `Prefer: outlook.body-content-type="text"` for some message types and returns HTML anyway | Low | Medium | Not verifiable without a live mailbox. The response carries `body.contentType`, so the caller can see what it got; CRUD Step 30g asserts the absence of tags against real mail |
-| `bodyPreview` is not exactly 255 characters in practice, so the truncation heuristic mis-fires | Low | Low | The threshold is the named constant `bodyPreviewCapRunes` with the reasoning at its definition; a false marker costs one line, a missed one costs the previous silence. CRUD Step 30g checks both directions against real mail |
+| Graph ignores `Prefer: outlook.body-content-type="text"` for some message types and returns HTML anyway | Low | Medium | **Largely closed** by the 2026-09-02 live check: a real HTML email came back as server-converted plain text. Residual risk is unusual message types only. The response carries `body.contentType`, so the caller can always see what it got |
+| `bodyPreview` is not exactly 255 characters in practice, so the truncation heuristic mis-fires | Low | Low | The threshold is the named constant `bodyPreviewCapRunes` with the reasoning at its definition; a false marker costs one line, a missed one costs the previous silence. The marker was confirmed firing on real over-cap mail; the exactly-255-and-complete case remains untested. CRUD Step 30g checks both directions |
+| `body_mode=text` is larger than a reader expects on link-heavy mail | Medium | Low | Real behaviour, not a defect: Graph's conversion keeps URLs inline and expanded, so a single SafeLinks-rewritten link costs ~500 characters. Documented in "Why Graph does the conversion" so the reader meets it in the CR rather than in a response |
 | A very long thread with `body_mode=text` returns a large response | Medium | Medium | Bounded by `max_results` (default 50, max 100), which the caller can lower before escalating; the third registry example shows exactly that |
 | The undeclared `body` alias is stripped by a client on a `MAIL_MANAGE_ENABLED=false` server | Low | Low | Degrades to the documented default, never to a wrong body. `body_mode` is declared on both verbs and always forwarded |
 | A future CR adds a second `Prefer` preference to one of these verbs and stacks it | Low | Medium | `newPreferHeaders` is the only constructor in the new code, AGENTS.md makes it mandatory, and `TestNewPreferHeaders_CombinesIntoOneValue` fails if it stops combining |

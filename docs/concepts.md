@@ -23,12 +23,14 @@ There are exactly three tiers and there will not be a fourth. A question about *
 | `body_mode` | What you get | What it costs |
 |---|---|---|
 | `preview` (default) | Graph's `bodyPreview`: the first 255 characters, whitespace-normalised, no markup | Nothing beyond the previous behaviour |
-| `text` | The complete body converted to plain text **by Microsoft Graph** | The length of the message, with no markup overhead |
+| `text` | The complete body converted to plain text **by Microsoft Graph** | The length of the message, without markup — measured at roughly a fifth of `output=raw` |
 | `full` | The complete body exactly as stored, which for most modern mail is HTML | The length of the message plus its inline styles |
 
 `preview` is the default so that reading a message stays cheap. In `text` output a preview that was cut at the cap says so in band, so a message that stops mid-sentence is never mistaken for a short message.
 
 `text` mode sends the `Prefer: outlook.body-content-type="text"` request header, so the HTML-to-text conversion happens on Microsoft's side. This server never parses, strips, or sanitises HTML, and carries no dependency that could.
+
+Plain text is not uniformly small. Graph's conversion keeps URLs inline and fully expanded, so on link-heavy mail a single SafeLinks-rewritten link can occupy several hundred characters. `text` is still far cheaper than `output=raw` — and far more readable — but do not expect it to be proportional to the prose you can see.
 
 `full` returns the same HTML body that `output=raw` has always returned, but on its own — without `internetMessageHeaders`, `conversationIndex`, `replyTo` and `bccRecipients`. Use `output=raw` when you actually want those fields; use `body_mode=full` when you only wanted the body.
 

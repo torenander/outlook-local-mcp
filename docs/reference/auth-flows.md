@@ -160,14 +160,16 @@ sequenceDiagram
 
 ## Flow: `device_code` (the default)
 
-`handleDeviceCodeAuth` starts `Authenticate` in a background goroutine with a `chan DeviceCodePrompt` in the context under `DeviceCodeMsgKey`. The credential's `UserPrompt` callback (`deviceCodeUserPrompt`) forwards the whole `azidentity.DeviceCodeMessage` — not just its rendered sentence — so the receiver can build a one-click URL.
+`handleDeviceCodeAuth` starts `Authenticate` in a background goroutine with a `chan DeviceCodePrompt` in the context under `DeviceCodeMsgKey`. The credential's `UserPrompt` callback (`deviceCodeUserPrompt`) forwards the whole `azidentity.DeviceCodeMessage` — not just its rendered sentence — so the receiver can build a direct sign-in URL and quote the code separately.
 
 `presentDeviceCode` then:
 
-1. Composes `DeviceCodePrompt.OneClickURL()` — the verification URL with `?otc=<UserCode>`, which pre-fills the code box on the device login page.
-2. Requests a **URL mode** elicitation for that link.
+1. Composes `DeviceCodePrompt.SignInURL()` — the verification URL with `?otc=<UserCode>`.
+
+   **Verified live 2026-09-02:** `https://login.microsoft.com/device?otc=<code>` redirects to `https://login.microsoftonline.com/common/oauth2/deviceauth?otc=<code>`, so the parameter survives the redirect — but the page renders "Enter code to allow access" with the Code field **empty**. Microsoft does not pre-fill it. The URL is a navigation shortcut only, which is why step 2 must carry the code.
+2. Requests a **URL mode** elicitation for that link, with a message quoting the user code. The message **must** name the code: URL mode shows the user a link and a message and nothing else, so omitting it strands them on the right page with nothing to type.
 3. On acknowledgement, waits (bounded by `browserTimeout`) for the background attempt and retries the original tool call.
-4. On any elicitation error — including `ErrElicitationNotSupported` — returns `prompt.FallbackText()`: the Entra ID message **verbatim**, followed by the same one-click link. Per [CR-0031](../cr/CR-0031-elicitation-fallback.md), some clients answer elicitation with "Method not found" and this text is the only channel that reaches the user, so the message must never be reworded or dropped; the link is additive. Since `device_code` is the inferred default and many clients cannot elicit, this is the sign-in surface most users actually see.
+4. On any elicitation error — including `ErrElicitationNotSupported` — returns `prompt.Message` **verbatim**, with nothing appended: that message already names both the sign-in page and the code, so a second near-identical link would be noise. Per [CR-0031](../cr/CR-0031-elicitation-fallback.md), some clients answer elicitation with "Method not found" and this text is the only channel that reaches the user, so it must never be reworded or dropped. Since `device_code` is the inferred default and many clients cannot elicit, this is the sign-in surface most users actually see.
 
 ---
 

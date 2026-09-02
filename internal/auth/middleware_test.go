@@ -822,8 +822,8 @@ func TestAuthMiddleware_BrowserAuth_URLElicitation(t *testing.T) {
 }
 
 // TestAuthMiddleware_DeviceCodeAuth_URLElicitation verifies that
-// handleDeviceCodeAuth presents the device code as a one-click URL elicitation
-// with the user code pre-filled, and that accepting it waits for the
+// handleDeviceCodeAuth presents a direct link to the device sign-in page
+// together with the code to type there, and that accepting it waits for the
 // background flow and retries the original tool call (CR-0067 A7).
 func TestAuthMiddleware_DeviceCodeAuth_URLElicitation(t *testing.T) {
 	var elicitCalled bool
@@ -882,10 +882,15 @@ func TestAuthMiddleware_DeviceCodeAuth_URLElicitation(t *testing.T) {
 		t.Errorf("elicitation URL = %q, want the device login page", capturedURL)
 	}
 	if !strings.Contains(capturedURL, "otc=XYZ123") {
-		t.Errorf("elicitation URL = %q, want the user code pre-filled via otc", capturedURL)
+		t.Errorf("elicitation URL = %q, want the user code carried in otc", capturedURL)
 	}
 	if !strings.Contains(capturedMessage, "Authentication required") {
 		t.Errorf("elicitation message = %q, want an explanation of the link", capturedMessage)
+	}
+	// The sign-in page does not pre-fill the code, so the message is the only
+	// place the user can read it.
+	if !strings.Contains(capturedMessage, "XYZ123") {
+		t.Errorf("elicitation message = %q, want it to quote the code the user must type", capturedMessage)
 	}
 
 	// After acknowledgement the original tool call is retried.

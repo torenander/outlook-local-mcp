@@ -638,7 +638,7 @@ func (s *authMiddlewareState) handleDeviceCodeAuth(
 	// Wait for the device code message or early auth completion.
 	select {
 	case prompt := <-deviceCodeCh:
-		// Present the challenge as a one-click sign-in URL when the client
+		// Present the challenge as a direct sign-in link when the client
 		// supports URL elicitation.
 		slog.Info("device code prompt captured, presenting to client")
 		return s.presentDeviceCode(ctx, next, request, prompt, attempt), nil

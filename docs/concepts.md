@@ -47,7 +47,7 @@ Multi-account features (account selection prompts, inline authentication during 
 Two elicitation modes are used:
 
 - **Form mode** collects a value from the user. The `auth_code` flow uses it to ask for the redirect URL from the browser's address bar.
-- **URL mode** asks the user to open a link. The `browser` flow uses it to announce the login page, and the `device_code` flow uses it to present a one-click sign-in link with the code already filled in (`https://microsoft.com/devicelogin?otc=<code>`), so nothing has to be transcribed by hand.
+- **URL mode** asks the user to open a link. The `browser` flow uses it to announce the login page, and the `device_code` flow uses it to send the user straight to the device sign-in page (`https://microsoft.com/devicelogin?otc=<code>`) with the code quoted in the accompanying message. The link saves finding the page; it does not fill the code in for you — Microsoft renders the code field empty — so you still type it.
 
 Elicitation is never required. Every flow has a plain-text fallback that is returned verbatim in the tool result, because some clients answer elicitation requests with "Method not found" and the tool result is then the only channel that reaches the user:
 
@@ -81,7 +81,7 @@ Mail access is disabled by default and enabled in two tiers via environment vari
 
 Authentication is lazy — deferred until the first tool call rather than blocking at startup. Three flows are available, controlled by `OUTLOOK_MCP_AUTH_METHOD`. An explicit value always wins; when the variable is unset the method is inferred from the client ID.
 
-**`device_code`** (default for well-known client IDs, including the shipped `outlook-desktop` default) — the server obtains a device code from Entra ID and delivers it to the user, as a one-click link with the code pre-filled where the client supports URL elicitation, and as plain tool result text otherwise. The tool returns immediately; the next tool call after the user approves the sign-in picks up the cached token. Works everywhere, including headless and Docker.
+**`device_code`** (default for well-known client IDs, including the shipped `outlook-desktop` default) — the server obtains a device code from Entra ID and delivers it to the user: as a direct link to the sign-in page plus the code where the client supports URL elicitation, and as plain tool result text otherwise. The tool returns immediately; the next tool call after the user approves the sign-in picks up the cached token. Works everywhere, including headless and Docker.
 
 It is the default because it is the only flow that completes against the Microsoft first-party client IDs. The alternatives were both tested live and both fail: `browser` is rejected with `AADSTS50011` because those app registrations have no `http://localhost` redirect URI, and `auth_code` is now blocked by a Microsoft anti-phishing interstitial on the redirect page that warns the user not to copy the URL and then refuses to complete. Its one real cost is that a person must approve the code out of band, which is why the server avoids reaching that point wherever it can.
 

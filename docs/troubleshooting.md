@@ -39,7 +39,9 @@ Common failure modes and remediation steps for `outlook-local-mcp`.
 
 **Symptom:** Authentication returns a device code URL and code in the tool result text instead of completing automatically.
 
-**Cause:** The MCP client does not support the Elicitation API (e.g., Claude Code). Where URL elicitation *is* supported the server presents a one-click link with the code already filled in (`https://microsoft.com/devicelogin?otc=<code>`); otherwise it falls back to returning the device code message from Entra ID verbatim in the tool result.
+**Cause:** The MCP client does not support the Elicitation API (e.g., Claude Code). Where URL elicitation *is* supported the server presents a direct link to the sign-in page (`https://microsoft.com/devicelogin?otc=<code>`) with the code quoted alongside it; otherwise it falls back to returning the device code message from Entra ID verbatim in the tool result.
+
+**Note on the link:** it takes you straight to the device sign-in page, but it does **not** fill the code in for you. Microsoft preserves the `otc` parameter through the redirect and still renders the Code field empty, so type the code shown in the message. An empty field is expected, not a bug.
 
 **Remediation:**
 
@@ -51,6 +53,7 @@ Common failure modes and remediation steps for `outlook-local-mcp`.
 
 - `device_code` is the default for the shipped client ID, and the only flow that completes against Microsoft's first-party app registrations. See [Why device code is the default](#why-device-code-is-the-default).
 - The server tries a silent token refresh before every prompt, so a device code should appear only on a genuinely cold cache — not merely because an access token expired.
+- The sign-in link is a navigation shortcut only. You always have to type the code.
 - A device code flow that is never completed no longer freezes the session. The background attempt is bounded at 300 seconds, after which the pending state clears by itself.
 - While a device code sign-in is outstanding, calendar and mail verbs report that authentication is in progress, but every `account` verb (`list`, `login`, `refresh`, ...) remains callable.
 - If your organisation blocks device code flow (`AADSTS50199`), you will need your own app registration with an `http://localhost` redirect URI, set via `OUTLOOK_MCP_CLIENT_ID`, which selects the `browser` flow.

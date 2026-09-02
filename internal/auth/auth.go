@@ -329,8 +329,8 @@ type deviceCodeMsgKeyType struct{}
 // into the authentication context. The middleware and add_account handler
 // write this channel so that deviceCodeUserPrompt can forward the structured
 // device code challenge back, allowing callers to present it to the user —
-// either as the verbatim message or as a one-click URL with the code
-// pre-filled (CR-0067 A7).
+// either as the verbatim message or as a direct sign-in link with the code
+// quoted alongside it (CR-0067 A7).
 var DeviceCodeMsgKey = deviceCodeMsgKeyType{}
 
 // deviceCodeUserPrompt is the UserPrompt callback used by DeviceCodeCredential.
@@ -342,7 +342,7 @@ var DeviceCodeMsgKey = deviceCodeMsgKeyType{}
 // Additionally, if the context contains a device code prompt channel (injected
 // by the auth middleware via DeviceCodeMsgKey), the structured prompt is
 // forwarded through it so the middleware can return it as a tool result
-// visible to the user, or render it as a one-click sign-in URL.
+// visible to the user, or render it as a sign-in link plus the code.
 //
 // Parameters:
 //   - ctx: the context provided by the credential during Authenticate. When
@@ -355,7 +355,7 @@ func deviceCodeUserPrompt(ctx context.Context, msg azidentity.DeviceCodeMessage)
 	// Forward to middleware channel if available, so the device code
 	// challenge can be returned as a tool result visible in the chat. The
 	// whole struct is forwarded (not just msg.Message) so the receiver can
-	// build a one-click sign-in URL from UserCode.
+	// build a direct sign-in URL and quote UserCode separately.
 	if ch, ok := ctx.Value(DeviceCodeMsgKey).(chan DeviceCodePrompt); ok {
 		select {
 		case ch <- NewDeviceCodePrompt(msg):

@@ -4,9 +4,9 @@
 // azidentity UserPrompt callback back to whichever caller started the flow
 // (the auth middleware or the add_account tool). Carrying the structured
 // fields — rather than only the pre-rendered English sentence — lets callers
-// compose a one-click sign-in URL that pre-fills the user code, which is the
-// difference between "read this code and retype it" and "click here"
-// (CR-0067 A7).
+// build a direct link to the device sign-in page and quote the code
+// separately, instead of relying on the user to parse both out of one
+// sentence (CR-0067 A7).
 package auth
 
 import (
@@ -17,9 +17,10 @@ import (
 )
 
 // defaultDeviceLoginURL is the Entra ID device login page used when the
-// credential does not supply a verification URL of its own. Entra ID accepts
-// an "otc" (one-time code) query parameter on this page that pre-fills the
-// user code field, removing the manual transcription step.
+// credential does not supply a verification URL of its own. It accepts an
+// "otc" (one-time code) query parameter, which is preserved through the
+// redirect to the deviceauth page but does not pre-fill the code field; see
+// SignInURL.
 const defaultDeviceLoginURL = "https://microsoft.com/devicelogin"
 
 // DeviceCodePrompt is the structured device code challenge forwarded from the
@@ -28,7 +29,7 @@ const defaultDeviceLoginURL = "https://microsoft.com/devicelogin"
 // azidentity.DeviceCodeMessage exposes only these three fields, so this type
 // mirrors them exactly rather than inventing a richer shape. Callers that only
 // need the human-readable sentence use Message; callers that want to present a
-// clickable link use OneClickURL.
+// clickable link use SignInURL, and must also display UserCode.
 type DeviceCodePrompt struct {
 	// Message is the full English instruction produced by Entra ID, for
 	// example "To sign in, use a web browser to open the page
@@ -38,12 +39,13 @@ type DeviceCodePrompt struct {
 	Message string
 
 	// UserCode is the one-time code the user must supply on the verification
-	// page, for example "ABCD1234". Used to build OneClickURL.
+	// page, for example "ABCD1234". It must be shown to the user verbatim:
+	// the sign-in page does not pre-fill it (see SignInURL).
 	UserCode string
 
 	// VerificationURL is the page the user must visit, normally
 	// https://microsoft.com/devicelogin. Empty when Entra ID omits it, in
-	// which case OneClickURL falls back to defaultDeviceLoginURL.
+	// which case SignInURL falls back to defaultDeviceLoginURL.
 	VerificationURL string
 }
 
@@ -62,38 +64,29 @@ func NewDeviceCodePrompt(msg azidentity.DeviceCodeMessage) DeviceCodePrompt {
 	}
 }
 
-// FallbackText returns the tool result text shown to clients that cannot
-// render an elicitation — which, per CR-0031, is the only channel that reaches
-// the user at all for clients such as Claude Code. Since device_code is the
-// inferred default, this is the text most users will actually see, so it is
-// worth more than the bare SDK sentence.
+// SignInURL returns the device sign-in page to send the user to, carrying the
+// user code in the "otc" query parameter.
 //
-// The Entra ID message is reproduced verbatim and first, satisfying CR-0031
-// FR-2. A one-click link with the code pre-filled is appended below it, which
-// is strictly additive: a reader who ignores the extra line still has complete
-// instructions. The link is omitted when there is no user code to embed, since
-// a bare device login page adds nothing the message did not already say.
+// What this does and does not do, verified against a live device code on
+// 2026-09-02: opening https://login.microsoft.com/device?otc=<code> redirects
+// to https://login.microsoftonline.com/common/oauth2/deviceauth?otc=<code>,
+// so the parameter survives the redirect rather than being stripped — but the
+// page still renders "Enter code to allow access" with the Code field EMPTY.
+// Microsoft does not pre-fill it. The user must still type the code.
 //
-// Returns the tool result text. No side effects.
-func (p DeviceCodePrompt) FallbackText() string {
-	if p.UserCode == "" {
-		return p.Message
-	}
-	return p.Message + "\n\nOr open this link to sign in with the code already filled in:\n" + p.OneClickURL()
-}
-
-// OneClickURL returns the device login URL with the user code pre-filled via
-// the "otc" query parameter, so the user only has to approve the sign-in
-// rather than transcribe a code.
+// The URL is therefore a navigation shortcut only. It saves finding the right
+// page, which is worth something because the device sign-in page is not an
+// obvious URL, but callers MUST still show the user the code itself. The otc
+// parameter is retained because it is the documented deep-link form and costs
+// nothing, not because it currently has an observable effect.
 //
 // The base is VerificationURL when Entra ID supplied one, otherwise
 // defaultDeviceLoginURL. When UserCode is empty the base URL is returned
-// unchanged: a URL with an empty otc parameter would render a confusing empty
-// code box.
+// unchanged.
 //
 // Returns an absolute https URL suitable for MCP URL-mode elicitation. No
 // side effects.
-func (p DeviceCodePrompt) OneClickURL() string {
+func (p DeviceCodePrompt) SignInURL() string {
 	base := strings.TrimSpace(p.VerificationURL)
 	if base == "" {
 		base = defaultDeviceLoginURL

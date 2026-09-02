@@ -1,6 +1,6 @@
 ---
 name: authentication-resilience-and-recovery
-description: Remove the authentication friction that repeatedly interrupts LLM sessions by trying silent token refresh before any interactive flow, keeping the account and complete_auth recovery verbs reachable at all times, correcting the recovery guidance the middleware emits, targeting re-authentication at the account the call actually used, and presenting device codes as one-click links. device_code remains the inferred default; auth_code was trialled as the default and rejected on live evidence.
+description: Remove the authentication friction that repeatedly interrupts LLM sessions by trying silent token refresh before any interactive flow, keeping the account and complete_auth recovery verbs reachable at all times, correcting the recovery guidance the middleware emits, targeting re-authentication at the account the call actually used, and giving the device code prompt a direct sign-in link. device_code remains the inferred default; auth_code was trialled as the default and rejected on live evidence.
 id: "CR-0067"
 status: "proposed"
 date: 2026-08-31
@@ -16,11 +16,11 @@ source-commit: 5b22fb5
 
 ## Change Summary
 
-Authentication in `outlook-local-mcp` prompts far more often than it needs to, and when it does go wrong the server hides the very verbs that would repair it. This CR fixes that chain: the middleware attempts a silent token refresh before starting any user-visible flow, and the credentials are reconfigured so that such a refresh is possible at all; `system.complete_auth` is always registered; the `account` verbs stay callable while an authentication flow is pending; the recovery guidance the server emits names verbs that actually re-authenticate an existing account; re-authentication targets the account the failing tool call resolved to instead of the server default; and the device code is presented as a one-click link with the code already filled in.
+Authentication in `outlook-local-mcp` prompts far more often than it needs to, and when it does go wrong the server hides the very verbs that would repair it. This CR fixes that chain: the middleware attempts a silent token refresh before starting any user-visible flow, and the credentials are reconfigured so that such a refresh is possible at all; `system.complete_auth` is always registered; the `account` verbs stay callable while an authentication flow is pending; the recovery guidance the server emits names verbs that actually re-authenticate an existing account; re-authentication targets the account the failing tool call resolved to instead of the server default; and the device code prompt carries a direct link to the sign-in page alongside the code.
 
 **The inferred default remains `device_code`.** An earlier revision of this CR changed it to `auth_code`. Live testing killed that premise — Microsoft now blocks the copy-the-URL-from-the-address-bar pattern with an anti-phishing interstitial — and it has been reverted. The same testing also re-confirmed, first-hand, that `browser` fails against the shipped client ID with `AADSTS50011`. `device_code` is the only flow that completes. Both findings are recorded under [Rejected alternatives](#rejected-alternatives), because the next person to look at this will have the same idea we did.
 
-That makes the rest of the CR more important, not less. If the user must approve a device code, then every prompt we can avoid is worth avoiding, and every prompt we cannot avoid should be one click rather than a transcription exercise. That is A1 and A7 respectively.
+That makes the rest of the CR more important, not less. If the user must approve a device code, then every prompt we can avoid is worth avoiding, and every prompt we cannot avoid should be as short a path as possible. That is A1 and A7 respectively.
 
 > **Migration cost: none.** Because the inferred default is unchanged, no existing installation is asked to re-authenticate. Tokens stay where they are. This is a change in the CR's risk profile from its earlier revision, which would have forced one interactive sign-in per account. See [Migration cost](#migration-cost).
 
@@ -30,7 +30,7 @@ The friction is not one bug; it is a set of defects that compound. Each was veri
 
 **1. The shipped default needs a human at least once, and there is no way around it.** `config.InferAuthMethod` returns `device_code` for any client ID in `WellKnownClientIDs`, which includes the default `outlook-desktop` = `d3590ed6-52b3-4102-aeff-aad2292ab01c` (Microsoft Office). Device code requires a person to approve a code on a separate page, so an unattended session stalls there.
 
-The obvious response is to change the default. Both alternatives were tested live against that client ID and neither works: `browser` is rejected with `AADSTS50011`, and `auth_code` is blocked by a Microsoft anti-phishing interstitial (see [Rejected alternatives](#rejected-alternatives)). The default therefore stands, and the only available response is to make everything around it cost less — never prompt when the cache would have served (A1), and make the unavoidable prompt one click rather than a transcription exercise (A7).
+The obvious response is to change the default. Both alternatives were tested live against that client ID and neither works: `browser` is rejected with `AADSTS50011`, and `auth_code` is blocked by a Microsoft anti-phishing interstitial (see [Rejected alternatives](#rejected-alternatives)). The default therefore stands, and the only available response is to make everything around it cost less — never prompt when the cache would have served (A1), and make the unavoidable prompt as short a path as possible (A7).
 
 **2. The in-band alternative is unregistered exactly when it is needed.** `system.complete_auth` is only added to the system verb slice when `cfg.AuthMethod == "auth_code"` (`internal/server/system_verbs.go:212`). Under the default configuration the verb does not exist, so an assistant that has been told "finish the sign-in" discovers there is no verb to call. The per-account `auth_method` can also differ from the server default, so even a correctly configured server can be missing the verb for one of its accounts.
 
@@ -47,7 +47,7 @@ Individually each is survivable. Together they mean: the default install starts 
 ## Change Drivers
 
 * Interactive sessions are interrupted by full sign-in prompts that a silent refresh would have avoided — the largest source of friction, and entirely fixable.
-* The device code prompt, which cannot be eliminated, is presented as a code to transcribe rather than a link to click.
+* The device code prompt, which cannot be eliminated, makes the user find the sign-in page themselves, and — after a bug introduced mid-CR — briefly failed to show them the code at all.
 * The self-repair surface (`account.*`, `system.complete_auth`) is unavailable precisely when authentication is broken.
 * Recovery guidance that names the wrong verb actively degrades the registry it is meant to repair.
 * A data race in the pending-auth bookkeeping that `go test -race` can surface.
@@ -103,7 +103,7 @@ Seven changes, labelled A1-A7, implemented together because each removes one lin
 | A4 | Exempt the `account` domain from the pending-auth freeze and the fresh-credential fast path; bound the device code background context at 300s; make the pending-auth bookkeeping race free. |
 | A5 | Rewrite the recovery guidance to be correct and method-aware; reorder `classifyAuthError` so specific detail survives. |
 | A6 | Hand the resolved account back to the middleware through a mutable context slot; make the resolver's method inference honour the persisted `auth_method` and recognise `DeviceCodeCredential`. |
-| A7 | Present device codes as URL-mode elicitations pointing at `https://microsoft.com/devicelogin?otc=<UserCode>`; on acknowledgement, wait for the flow and retry the original call; keep the plain-text fallback verbatim. |
+| A7 | Present the device code as a URL-mode elicitation: a direct link to the device sign-in page, plus a message quoting the code to type there. On acknowledgement, wait for the flow and retry the original call. Keep the plain-text fallback verbatim and unaugmented. |
 
 ### Proposed State Diagram
 
@@ -128,7 +128,7 @@ flowchart TD
     M -->|failure| O{method}
     O -->|auth_code| P[browser + elicit redirect URL, or system.complete_auth]
     O -->|browser| Q[browser, 120s]
-    O -->|device_code, the default| R[one-click otc link, 300s bound]
+    O -->|device_code, the default| R[sign-in link + code, 300s bound]
     R --> S[on ack: wait, then retry]
 ```
 
@@ -160,8 +160,10 @@ flowchart TD
 18. `handleAuthError` **MUST** prefer the slot value over the closure credential when re-authenticating.
 19. `auth.inferAuthMethod(entry)` **MUST** honour a persisted `AccountEntry.AuthMethod` and, when it is empty, **MUST** distinguish `*azidentity.DeviceCodeCredential` from the browser case.
 20. `presentDeviceCode` **MUST** use URL-mode elicitation with a link of the form `https://microsoft.com/devicelogin?otc=<UserCode>`.
+20a. The elicitation message **MUST** quote the user code. URL-mode elicitation shows the user a link and a message and nothing else, and the sign-in page does not pre-fill the code, so a message that omits it strands the user on the right page with nothing to type.
+20b. No documentation, comment, or user-facing string **MAY** claim the code is pre-filled.
 21. The structured device code message (`UserCode`, `VerificationURL`, `Message`) **MUST** be forwarded through `DeviceCodeMsgKey`, not just the rendered sentence.
-22. When elicitation is unavailable or fails, the tool result text **MUST** reproduce the Entra ID device code message verbatim, preserving the CR-0031 fallback contract. It **MAY** append the one-click link below that message, and **MUST NOT** reword or omit the message itself. Because `device_code` is the inferred default and many clients cannot render elicitations, this text is the primary sign-in surface and is specified as such rather than as a degraded path.
+22. When elicitation is unavailable or fails, the tool result text **MUST** be the Entra ID device code message verbatim, preserving the CR-0031 fallback contract. Nothing **SHOULD** be appended: that message already names both the sign-in page and the code, so a second near-identical link is noise. Because `device_code` is the inferred default and many clients cannot render elicitations, this text is the primary sign-in surface and is specified as such rather than as a degraded path.
 23. After a successful elicitation acknowledgement, `presentDeviceCode` **MUST** wait (bounded) for the background flow to finish and then retry the original tool call.
 
 ### Non-Functional Requirements
@@ -188,7 +190,7 @@ Behaviour that *does* change for existing users, without requiring re-authentica
 
 * `GetToken` no longer escalates. An expired token now produces a coordinated middleware prompt instead of a browser window or device code appearing mid-request. See Risk 3a.
 * The startup probe now runs for `device_code`, so `preAuthenticated` reflects a real token check.
-* Device codes are presented as a one-click link where the client supports it, and the plain-text fallback gains the same link below the unchanged Entra message.
+* Device codes are presented as a direct sign-in link plus the code where the client supports URL elicitation. The plain-text fallback is unchanged: the Entra message verbatim.
 
 ## Affected Components
 
@@ -199,8 +201,8 @@ Behaviour that *does* change for existing users, without requiring re-authentica
 | `internal/auth/pending.go` *(new)* | `pendingAuthAttempt` and the race-free state helpers `begin`, `settle`, `pendingOutcome`. |
 | `internal/auth/account_slot.go` *(new)* | Mutable per-request `accountAuthSlot` and `resolvedAccountAuth`. |
 | `internal/auth/recovery_ops.go` *(new)* | `isRecoveryOperation`. |
-| `internal/auth/devicecode_prompt.go` *(new)* | `DeviceCodePrompt` and `OneClickURL`. |
-| `internal/auth/devicecode_present.go` *(new)* | URL-mode presentation, acknowledgement wait, verbatim fallback. |
+| `internal/auth/devicecode_prompt.go` *(new)* | `DeviceCodePrompt` and `SignInURL`. |
+| `internal/auth/devicecode_present.go` *(new)* | URL-mode presentation (link + code), acknowledgement wait, verbatim fallback. |
 | `internal/auth/middleware.go` | Entry-point restructure, silent attempt, slot install, pending rework, background deadlines on both interactive flows; `presentDeviceCode` moved out. |
 | `cmd/outlook-local-mcp/main.go` | `probeStartupToken` no longer special-cases `device_code`; the `authRecordPath` parameter is dropped. |
 | `internal/auth/errors.go` | `FormatAuthErrorFor`, `recoverySteps`, `authRequiredDetail`, an `AuthenticationRequiredError` branch, reordered classification. |
@@ -291,7 +293,7 @@ The type-system-pure alternative to the allowlist: wrap each azidentity credenti
 
 ### User Impact
 
-Positive and free: fewer prompts, and the prompts that remain are a link rather than a code to copy. No re-authentication, no configuration change, no behavioural surprise on upgrade. The one thing users do *not* get is unattended first sign-in, which the platform does not currently permit for this client ID.
+Positive and free: fewer prompts, and the prompt that remains comes with a direct link to the right page instead of leaving the user to find it. No re-authentication, no configuration change, no behavioural surprise on upgrade. The one thing users do *not* get is unattended first sign-in, which the platform does not currently permit for this client ID.
 
 ### Technical Impact
 
@@ -333,16 +335,34 @@ Add `FormatAuthErrorFor` and `recoverySteps`; keep `FormatAuthError` as the meth
 
 Add `account_slot.go`. Install the slot in the middleware entry point, fill it in `AccountResolver`, read it via `resolvedAccountAuth` in `handleAuthError`. Rewrite `inferAuthMethod(entry)`.
 
-### A7: One-click device code
+### A7: Direct sign-in link for the device code
 
-Add `devicecode_prompt.go` (`DeviceCodePrompt`, `OneClickURL`) and `devicecode_present.go`. Change the `DeviceCodeMsgKey` channel element type and update every writer and reader, including `internal/tools/add_account.go`.
+Add `devicecode_prompt.go` (`DeviceCodePrompt`, `SignInURL`) and `devicecode_present.go`. Change the `DeviceCodeMsgKey` channel element type and update every writer and reader, including `internal/tools/add_account.go`.
+
+**What the link does, verified live on 2026-09-02.** Opening `https://login.microsoft.com/device?otc=GFXCFLG2A` redirects to `https://login.microsoftonline.com/common/oauth2/deviceauth?otc=GFXCFLG2A`. The `otc` parameter **is preserved** through the redirect rather than stripped. The page nonetheless renders "Enter code to allow access" with the **Code field empty**. Microsoft does not pre-fill it.
+
+So A7 removes the *navigation* step, not the transcription step. The user still types the code.
+
+An earlier revision of this CR asserted the opposite and shipped two defects on that premise:
+
+1. The elicitation message read "the sign-in code is already filled in for you" — false, and alarming for a user staring at an empty field.
+2. Worse, because the message was believed to be redundant, it did not include the code. URL-mode elicitation shows the user a link and that message and nothing else, so on clients that *do* support URL elicitation the code never reached the user at all. That path was broken outright.
+
+Both are fixed: the message now reads "Open this link and enter the code `<CODE>` to finish signing in to Microsoft", and a regression test asserts the code is present and that no string claims pre-filling.
+
+**Reassessment: is the link still worth shipping?** Split verdict.
+
+* **URL-mode elicitation — keep.** URL mode requires a URL, so the only question is *which* one, and the deep link to the device-auth page is strictly better than nothing. `https://login.microsoft.com/device` is not a URL anyone guesses. More importantly, the valuable half of A7 was never the link: it is that acknowledging the elicitation now waits for the background flow and **retries the original tool call**, so the sign-in completes the user's actual request instead of returning instructions the agent cannot act on. That stands regardless of pre-filling.
+* **The appended line in the plain-text fallback — dropped.** This was the one that had to go. The Entra ID message already reads "use a web browser to open the page `https://microsoft.com/devicelogin` and enter the code `ABCD1234`" — it *already contains both the URL and the code*. Appending a second, near-identical URL added a duplicate link, a false promise, and nothing else. The fallback is now the Entra message verbatim and unaugmented, which is also the cleanest possible reading of the CR-0031 contract. `FallbackText()` has been deleted rather than reworded.
+
+The `otc` parameter is retained in `SignInURL` because it is the documented deep-link form and costs nothing, and is documented as having no observable effect today. If a reviewer prefers to drop it, that is a one-line change with no behavioural consequence.
 
 ## Test Strategy
 
 ### Tests to Add
 
 * `internal/auth/silent_test.go` — nil credential; successful and failing silent acquisition; **the escalating credential is never probed**; `*AuthCodeCredential` satisfies `SilentTokenCredential`.
-* `internal/auth/devicecode_prompt_test.go` — field round trip; `OneClickURL` with and without a user code, with and without a verification URL, with pre-existing query parameters.
+* `internal/auth/devicecode_prompt_test.go` — field round trip; `SignInURL` with and without a user code, with and without a verification URL, with pre-existing query parameters; `deviceCodeElicitMessage` quotes the code and never claims pre-filling.
 * `internal/auth/recovery_ops_test.go` — domain classification.
 * `internal/auth/middleware_cr0067_test.go` — pending auth blocks an ordinary verb but allows an `account` verb; a fresh credential allows an `account` verb without starting a flow; a successful silent refresh skips the prompt on both paths; `AccountResolver` hands the account back so re-auth targets it; `inferAuthMethod` per entry shape; `pendingOutcome` transitions; classification preserves device code detail; method-specific recovery steps never mention `operation="add"`.
 * `internal/tools/complete_auth_test.go` — table-driven unavailability message per method.
@@ -352,7 +372,7 @@ Add `devicecode_prompt.go` (`DeviceCodePrompt`, `OneClickURL`) and `devicecode_p
 
 * `internal/config/config_test.go` — default and well-known inference now expect `auth_code`; an explicit `device_code` case is added.
 * `internal/auth/errors_test.go`, `internal/auth/middleware_test.go` — guidance assertions move from `account_list`/`account_add` to `operation="list"`/`operation="login"`.
-* `internal/auth/middleware_test.go` — device code channel element type; the former form-elicitation test becomes a URL-elicitation test asserting the `otc` parameter and the retry.
+* `internal/auth/middleware_test.go` — device code channel element type; the former form-elicitation test becomes a URL-elicitation test asserting the `otc` parameter, that the message quotes the code, and the retry.
 * `internal/tools/add_account_test.go` — device code channel element type.
 * `cmd/outlook-local-mcp/main_test.go` — the two `device_code`-skip subtests are replaced by subtests asserting the probe now calls `GetToken` for `device_code`; the `authRecordPath` argument is dropped from all call sites.
 
@@ -386,9 +406,9 @@ No `FormatAuthError` output names `operation="add"` as the primary step. `auth_c
 
 With one registered account whose authenticator differs from the closure credential, an auth error inside the resolved handler re-authenticates the account credential and not the closure credential.
 
-### AC-7: Device code is one click, with the fallback intact
+### AC-7: The sign-in link and the code both reach the user
 
-URL elicitation is called with a URL containing `otc=<UserCode>`. On acceptance the original tool call is retried. On `ErrElicitationNotSupported` the tool result text begins with the Entra ID message reproduced verbatim and carries the same one-click link below it; with no user code available it is exactly the message and nothing else.
+URL elicitation is called with a link to the device sign-in page carrying `otc=<UserCode>`, **and** a message quoting `<UserCode>`. On acceptance the original tool call is retried. On `ErrElicitationNotSupported` the tool result text is the Entra ID message verbatim, with nothing appended. No string in the codebase or documentation claims the code is pre-filled.
 
 ## Quality Standards Compliance
 
@@ -408,7 +428,7 @@ Per the AGENTS.md documentation governance rules: per-verb reference for `comple
 
 ### Risk 1: `device_code` remains unattendable
 
-**Not mitigated, and not mitigable at this layer.** With `browser` and `auth_code` both unavailable against the first-party client ID, a fully unattended first sign-in is not possible. What this CR does is ensure it is required as rarely as possible (A1: silent refresh before every prompt) and is as cheap as possible when required (A7: one click, not a transcription). Operators who need true unattended startup must register their own application with a localhost redirect URI and set `OUTLOOK_MCP_CLIENT_ID`, which routes them to `browser` via the existing `default` inference.
+**Not mitigated, and not mitigable at this layer.** With `browser` and `auth_code` both unavailable against the first-party client ID, a fully unattended first sign-in is not possible. What this CR does is ensure it is required as rarely as possible (A1: silent refresh before every prompt) and is as short a path as possible when required (A7: a direct link to the sign-in page). Operators who need true unattended startup must register their own application with a localhost redirect URI and set `OUTLOOK_MCP_CLIENT_ID`, which routes them to `browser` via the existing `default` inference.
 
 ### Risk 2: The platform moves again and `auth_code` becomes viable, or `device_code` stops being
 

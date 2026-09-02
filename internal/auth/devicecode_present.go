@@ -3,13 +3,14 @@
 // This file renders a device code challenge to the user and, when the client
 // can talk back, waits for the sign-in to finish and retries the original tool
 // call. It is separate from middleware.go so the two presentation modes —
-// one-click URL elicitation and the verbatim plain-text fallback — stay
+// URL elicitation (link plus code) and the verbatim plain-text fallback — stay
 // readable side by side.
 package auth
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -18,24 +19,44 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-// deviceCodeElicitMessage is the instruction shown alongside the one-click
-// sign-in URL. It states what the link does, because a URL elicitation shows
-// the user a link and little else.
-const deviceCodeElicitMessage = "Authentication required. Open this link to finish signing in to Microsoft — " +
-	"the sign-in code is already filled in for you."
+// deviceCodeElicitMessage builds the instruction shown alongside the sign-in
+// link in a URL-mode elicitation.
+//
+// It MUST quote the user code. A URL elicitation shows the user a link and
+// this message and nothing else, and the sign-in page does not pre-fill the
+// code (see DeviceCodePrompt.SignInURL) — so a message that omitted the code
+// would drop the user on the right page with nothing to type. An earlier
+// revision of CR-0067 did exactly that, on the false premise that the otc
+// parameter pre-filled the field.
+//
+// Parameters:
+//   - prompt: the device code challenge being presented.
+//
+// Returns the message text. No side effects.
+func deviceCodeElicitMessage(prompt DeviceCodePrompt) string {
+	if prompt.UserCode == "" {
+		return "Authentication required. Open this link to finish signing in to Microsoft."
+	}
+	return fmt.Sprintf(
+		"Authentication required. Open this link and enter the code %s to finish signing in to Microsoft.",
+		prompt.UserCode)
+}
 
 // presentDeviceCode shows the device code challenge to the user and, when the
 // client acknowledges it, waits for authentication to complete and retries the
 // original tool call.
 //
-// Presentation is attempted as a URL mode elicitation pointing at the device
-// login page with the user code pre-filled via the "otc" query parameter, so
-// the user clicks a link instead of transcribing a code (CR-0067 A7).
+// Presentation is attempted as a URL mode elicitation: a direct link to the
+// device sign-in page, plus a message quoting the code to type there. The link
+// is a navigation shortcut only — Microsoft does not pre-fill the code field
+// (see DeviceCodePrompt.SignInURL) — which is why the message must carry the
+// code (CR-0067 A7).
 //
-// When the client does not support elicitation, DeviceCodePrompt.FallbackText
-// is returned as plain text: the Entra ID message verbatim, plus the same
-// one-click link below it. That fallback carries most of the real traffic —
-// per CR-0031, clients such as Claude Code answer elicitation requests with
+// When the client does not support elicitation, the Entra ID message is
+// returned verbatim as plain text. It already names both the page and the
+// code, so nothing is appended to it: a second near-identical URL would add
+// noise, not help. That fallback carries most of the real traffic — per
+// CR-0031, clients such as Claude Code answer elicitation requests with
 // "Method not found", and the tool result text is then the only channel that
 // reaches the user at all — so the Entra sentence must never be reworded or
 // dropped.
@@ -61,20 +82,20 @@ func (s *authMiddlewareState) presentDeviceCode(
 	prompt DeviceCodePrompt,
 	attempt *pendingAuthAttempt,
 ) *mcp.CallToolResult {
-	result, err := s.urlElicit(ctx, uuid.New().String(), prompt.OneClickURL(), deviceCodeElicitMessage)
+	result, err := s.urlElicit(ctx, uuid.New().String(), prompt.SignInURL(), deviceCodeElicitMessage(prompt))
 	if err != nil {
 		if errors.Is(err, mcpserver.ErrElicitationNotSupported) {
 			slog.Info("URL elicitation not supported, returning device code as text")
 		} else {
 			slog.Warn("device code elicitation failed, returning as text", "error", err)
 		}
-		return mcp.NewToolResultText(prompt.FallbackText())
+		return mcp.NewToolResultText(prompt.Message)
 	}
 
 	if result == nil || result.Action != mcp.ElicitationResponseActionAccept {
 		// Declined or cancelled: still hand back the instructions so the user
 		// can complete the sign-in later without starting over.
-		return mcp.NewToolResultText(prompt.FallbackText())
+		return mcp.NewToolResultText(prompt.Message)
 	}
 
 	// The user says they have opened the link. Wait for the background flow to
@@ -121,6 +142,6 @@ func (s *authMiddlewareState) awaitDeviceCodeCompletion(
 		// Sign-in is still outstanding. Leave the background flow running and
 		// return the instructions so the user can finish; the next tool call
 		// picks up the completed authentication at middleware entry.
-		return mcp.NewToolResultText(prompt.FallbackText())
+		return mcp.NewToolResultText(prompt.Message)
 	}
 }

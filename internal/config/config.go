@@ -349,7 +349,7 @@ func LoadConfig() Config {
 //
 // device_code does require the user to approve a code out of band, which is
 // why CR-0067 invests in making that path cheap: a silent refresh is attempted
-// before any prompt, and the code is presented as a one-click link.
+// before any prompt, and the prompt links straight to the sign-in page.
 // "auth_code" remains fully supported for tenants where it works, via an
 // explicit OUTLOOK_MCP_AUTH_METHOD.
 //

@@ -15,5 +15,5 @@ data:
   OUTLOOK_MCP_LOG_LEVEL: "info"
   OUTLOOK_MCP_LOG_FORMAT: "json"
   OUTLOOK_MCP_CACHE_NAME: "outlook-local-mcp"
-  OUTLOOK_MCP_AUTH_METHOD: "device_code"  # auth_code (default) requires a browser; use device_code for headless/container environments
+  OUTLOOK_MCP_AUTH_METHOD: "device_code"  # device_code is also the inferred default for well-known client IDs; set explicitly here so container deployments never depend on inference
   OUTLOOK_MCP_AUTH_RECORD_PATH: "/data/auth/auth_record.json"

@@ -119,8 +119,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 		t.Errorf("LogFile = %q, want empty", cfg.LogFile)
 	}
 
-	if cfg.AuthMethod != "auth_code" {
-		t.Errorf("AuthMethod = %q, want %q", cfg.AuthMethod, "auth_code")
+	if cfg.AuthMethod != "device_code" {
+		t.Errorf("AuthMethod = %q, want %q", cfg.AuthMethod, "device_code")
 	}
 
 	// DefaultTimezone should be resolved from "auto" to a valid IANA timezone.
@@ -627,15 +627,15 @@ func TestLoadConfig_LogFileCustom(t *testing.T) {
 }
 
 // TestLoadConfig_AuthMethodDefault validates that AuthMethod defaults to
-// "auth_code" when OUTLOOK_MCP_AUTH_METHOD is not set and the default
-// client ID (outlook-desktop, a well-known name) is used (CR-0067).
+// "device_code" when OUTLOOK_MCP_AUTH_METHOD is not set and the default
+// client ID (outlook-desktop, a well-known name) is used.
 func TestLoadConfig_AuthMethodDefault(t *testing.T) {
 	clearOutlookEnvVars(t)
 
 	cfg := LoadConfig()
 
-	if cfg.AuthMethod != "auth_code" {
-		t.Errorf("AuthMethod = %q, want %q", cfg.AuthMethod, "auth_code")
+	if cfg.AuthMethod != "device_code" {
+		t.Errorf("AuthMethod = %q, want %q", cfg.AuthMethod, "device_code")
 	}
 }
 
@@ -683,13 +683,15 @@ func TestLoadConfig_AccountsPathEnvVar(t *testing.T) {
 	}
 }
 
-// TestInferAuthMethod_DefaultAuthCode validates that when the default client
-// ID (outlook-desktop UUID) is used with no explicit auth method, auth_code
-// is returned with source "inferred" (CR-0067).
-func TestInferAuthMethod_DefaultAuthCode(t *testing.T) {
+// TestInferAuthMethod_DefaultDeviceCode validates that when the default client
+// ID (outlook-desktop UUID) is used with no explicit auth method, device_code
+// is returned with source "inferred". CR-0067 tested auth_code here and
+// reverted: Microsoft's anti-phishing interstitial on the nativeclient
+// redirect page prevents that flow from completing.
+func TestInferAuthMethod_DefaultDeviceCode(t *testing.T) {
 	got, source := InferAuthMethod("d3590ed6-52b3-4102-aeff-aad2292ab01c", "")
-	if got != "auth_code" {
-		t.Errorf("InferAuthMethod(default, '') method = %q, want %q", got, "auth_code")
+	if got != "device_code" {
+		t.Errorf("InferAuthMethod(default, '') method = %q, want %q", got, "device_code")
 	}
 	if source != "inferred" {
 		t.Errorf("InferAuthMethod(default, '') source = %q, want %q", source, "inferred")
@@ -709,14 +711,14 @@ func TestInferAuthMethod_CustomClientBrowser(t *testing.T) {
 	}
 }
 
-// TestInferAuthMethod_WellKnownAuthCode validates that a well-known client
+// TestInferAuthMethod_WellKnownDeviceCode validates that a well-known client
 // ID UUID (e.g. outlook-local-mcp) with no explicit auth method returns
-// auth_code with source "inferred" (CR-0067).
-func TestInferAuthMethod_WellKnownAuthCode(t *testing.T) {
+// device_code with source "inferred".
+func TestInferAuthMethod_WellKnownDeviceCode(t *testing.T) {
 	// outlook-local-mcp UUID
 	got, source := InferAuthMethod("dd5fc5c5-eb9a-4f6f-97bd-1a9fecb277d3", "")
-	if got != "auth_code" {
-		t.Errorf("InferAuthMethod(well-known-uuid, '') method = %q, want %q", got, "auth_code")
+	if got != "device_code" {
+		t.Errorf("InferAuthMethod(well-known-uuid, '') method = %q, want %q", got, "device_code")
 	}
 	if source != "inferred" {
 		t.Errorf("InferAuthMethod(well-known-uuid, '') source = %q, want %q", source, "inferred")
@@ -748,15 +750,15 @@ func TestLoadConfig_DefaultClientIDOutlookDesktop(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_DefaultAuthMethodAuthCode validates that LoadConfig defaults
-// to auth_code when no auth method or client ID is set (CR-0067).
-func TestLoadConfig_DefaultAuthMethodAuthCode(t *testing.T) {
+// TestLoadConfig_DefaultAuthMethodDeviceCode validates that LoadConfig
+// defaults to device_code when no auth method or client ID is set.
+func TestLoadConfig_DefaultAuthMethodDeviceCode(t *testing.T) {
 	clearOutlookEnvVars(t)
 
 	cfg := LoadConfig()
 
-	if cfg.AuthMethod != "auth_code" {
-		t.Errorf("AuthMethod = %q, want %q", cfg.AuthMethod, "auth_code")
+	if cfg.AuthMethod != "device_code" {
+		t.Errorf("AuthMethod = %q, want %q", cfg.AuthMethod, "device_code")
 	}
 }
 
@@ -992,14 +994,14 @@ func TestInferAuthMethod_ReturnsSource(t *testing.T) {
 			name:       "well-known client inferred",
 			clientID:   "d3590ed6-52b3-4102-aeff-aad2292ab01c",
 			explicit:   "",
-			wantMethod: "auth_code",
+			wantMethod: "device_code",
 			wantSource: "inferred",
 		},
 		{
-			name:       "explicit device_code still wins",
+			name:       "explicit auth_code overrides the inferred device_code",
 			clientID:   "d3590ed6-52b3-4102-aeff-aad2292ab01c",
-			explicit:   "device_code",
-			wantMethod: "device_code",
+			explicit:   "auth_code",
+			wantMethod: "auth_code",
 			wantSource: "explicit",
 		},
 		{

@@ -49,31 +49,25 @@ Common failure modes and remediation steps for `outlook-local-mcp`.
 
 **Notes:**
 
-- `device_code` is fully supported but is no longer the inferred default; `auth_code` is. Select it explicitly with `OUTLOOK_MCP_AUTH_METHOD=device_code`.
+- `device_code` is the default for the shipped client ID, and the only flow that completes against Microsoft's first-party app registrations. See [Why device code is the default](#why-device-code-is-the-default).
+- The server tries a silent token refresh before every prompt, so a device code should appear only on a genuinely cold cache — not merely because an access token expired.
 - A device code flow that is never completed no longer freezes the session. The background attempt is bounded at 300 seconds, after which the pending state clears by itself.
 - While a device code sign-in is outstanding, calendar and mail verbs report that authentication is in progress, but every `account` verb (`list`, `login`, `refresh`, ...) remains callable.
-- If your organisation blocks device code flow (`AADSTS50199`), switch to `auth_code`.
+- If your organisation blocks device code flow (`AADSTS50199`), you will need your own app registration with an `http://localhost` redirect URI, set via `OUTLOOK_MCP_CLIENT_ID`, which selects the `browser` flow.
 
 ---
 
-## Re-authentication after upgrading {#reauth-after-upgrade}
+## Why device code is the default {#why-device-code-is-the-default}
 
-**Symptom:** After upgrading the server, the first tool call asks you to sign in again even though nothing was signed out and the previous version had a working session.
+**Question:** Why does the server make me approve a code instead of just opening a browser?
 
-**Cause:** The default authentication method for well-known client IDs changed from `device_code` to `auth_code`. The two flows do not share a token store: the `azidentity` credentials used by `browser` and `device_code` keep tokens in the OS keychain entry named after `OUTLOOK_MCP_CACHE_NAME`, while the `auth_code` credential keeps its own MSAL cache blob in a separate `{cache-name}_msal.bin` entry. A token cached by the old default is therefore invisible to the new one.
+**Answer:** Because the other two flows do not work against the Microsoft first-party client ID the server ships with (`d3590ed6-52b3-4102-aeff-aad2292ab01c`). Both were tested end to end against a real account:
 
-This is a **one-time** cost: exactly one interactive sign-in per account. After that, tokens renew silently as before.
+- **`browser`** fails. `InteractiveBrowserCredential` binds a random localhost port, and that app registration has no `http://localhost` redirect URI, so Entra ID rejects the sign-in:
+  `AADSTS50011: The redirect URI 'http://localhost:65053' specified in the request does not match the redirect URIs configured for the application`.
+- **`auth_code`** no longer completes. Microsoft now shows an anti-phishing interstitial on the redirect page — *"This page is not normally shown and could be a sign of a phishing attempt. The URL contains your password. Close this page immediately and do not copy or share the URL with anyone"* — and then *"You have reached the wrong page"*. Copying a code out of the address bar is exactly the pattern Microsoft is hardening against.
 
-**Remediation:**
-
-1. Call `{tool: "account", args: {operation: "list"}}` to see which accounts are disconnected.
-2. For each one, call `{tool: "account", args: {operation: "login", label: "<label>"}}`.
-3. A browser opens. After signing in, copy the full URL from the address bar and either paste it into the elicitation prompt or pass it to `{tool: "system", args: {operation: "complete_auth", redirect_url: "<url>", account: "<label>"}}`.
-
-**Notes:**
-
-- Accounts already recorded in `accounts.json` keep the `auth_method` they were registered with. An account persisted as `device_code` continues to use device code until you remove and re-add it — the new default only applies where no method is recorded and none is set explicitly.
-- To avoid the re-authentication entirely, pin the previous behaviour with `OUTLOOK_MCP_AUTH_METHOD=device_code`.
+Device code is what remains. To avoid it entirely, register your own application in Entra ID with an `http://localhost` redirect URI and set `OUTLOOK_MCP_CLIENT_ID` to its UUID; custom client IDs default to the `browser` flow.
 
 ---
 
@@ -86,8 +80,8 @@ This is a **one-time** cost: exactly one interactive sign-in per account. After 
 **Remediation:**
 
 1. Retry the tool call to trigger a fresh browser auth attempt.
-2. If the browser does not open automatically, use the `auth_code` method instead: set `OUTLOOK_MCP_AUTH_METHOD=auth_code` and restart the server. This is also the default for well-known client IDs, which have no `http://localhost` redirect URI registered and fail the `browser` flow with `AADSTS50011`.
-3. For machines with no browser at all, use `device_code` authentication: set `OUTLOOK_MCP_AUTH_METHOD=device_code`.
+2. If the sign-in fails with `AADSTS50011`, the app registration in use has no `http://localhost` redirect URI. The Microsoft first-party client IDs do not; register your own application and set `OUTLOOK_MCP_CLIENT_ID`, or fall back to `device_code`.
+3. For machines with no browser at all, use `device_code` authentication: set `OUTLOOK_MCP_AUTH_METHOD=device_code`. It is already the default for well-known client IDs.
 
 ---
 
@@ -95,7 +89,9 @@ This is a **one-time** cost: exactly one interactive sign-in per account. After 
 
 **Symptom:** The server returns an auth URL and asks you to paste the redirect URL back.
 
-**Cause:** The `auth_code` method was selected. After signing in, the browser redirects to the `nativeclient` URI and shows the full redirect URL in the address bar.
+**Cause:** The `auth_code` method was selected explicitly via `OUTLOOK_MCP_AUTH_METHOD=auth_code`. After signing in, the browser redirects to the `nativeclient` URI and shows the full redirect URL in the address bar.
+
+**Before you use this flow:** against Microsoft's first-party client IDs it no longer completes. The redirect page now shows an anti-phishing warning telling you not to copy the URL, followed by "You have reached the wrong page". It is not the default for that reason. It may still work against your own app registration.
 
 **Remediation:**
 
@@ -105,7 +101,7 @@ This is a **one-time** cost: exactly one interactive sign-in per account. After 
 
 **Notes:**
 
-- `system.complete_auth` is registered unconditionally. Calling it while the target account uses `browser` or `device_code` is not an error; the verb replies with the recovery path that does apply.
+- `system.complete_auth` is registered unconditionally, so it does not vanish when you switch methods. Calling it while the target account uses `browser` or `device_code` is not an error; the verb replies with the recovery path that does apply.
 - Authorization codes expire after roughly 10 minutes. If the exchange fails with an expired-code error, start the sign-in again with `{tool: "account", args: {operation: "login", label: "<label>"}}`.
 
 ---

@@ -62,6 +62,26 @@ func NewDeviceCodePrompt(msg azidentity.DeviceCodeMessage) DeviceCodePrompt {
 	}
 }
 
+// FallbackText returns the tool result text shown to clients that cannot
+// render an elicitation — which, per CR-0031, is the only channel that reaches
+// the user at all for clients such as Claude Code. Since device_code is the
+// inferred default, this is the text most users will actually see, so it is
+// worth more than the bare SDK sentence.
+//
+// The Entra ID message is reproduced verbatim and first, satisfying CR-0031
+// FR-2. A one-click link with the code pre-filled is appended below it, which
+// is strictly additive: a reader who ignores the extra line still has complete
+// instructions. The link is omitted when there is no user code to embed, since
+// a bare device login page adds nothing the message did not already say.
+//
+// Returns the tool result text. No side effects.
+func (p DeviceCodePrompt) FallbackText() string {
+	if p.UserCode == "" {
+		return p.Message
+	}
+	return p.Message + "\n\nOr open this link to sign in with the code already filled in:\n" + p.OneClickURL()
+}
+
 // OneClickURL returns the device login URL with the user code pre-filled via
 // the "otc" query parameter, so the user only has to approve the sign-in
 // rather than transcribe a code.

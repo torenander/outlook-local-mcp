@@ -176,9 +176,9 @@ type Config struct {
 	// AuthMethodSource indicates how the AuthMethod value was determined.
 	// "explicit" means the user set OUTLOOK_MCP_AUTH_METHOD; "inferred" means
 	// the method was determined from a well-known client ID in
-	// WellKnownClientIDs (which yields "auth_code" per CR-0067); "default"
-	// means the client ID did not match any well-known UUID and the fallback
-	// method ("browser") was used.
+	// WellKnownClientIDs (which yields "device_code"); "default" means the
+	// client ID did not match any well-known UUID and the fallback method
+	// ("browser") was used.
 	AuthMethodSource string
 }
 
@@ -332,17 +332,26 @@ func LoadConfig() Config {
 // which remains fully supported).
 //
 // When the client ID matches a well-known UUID from the WellKnownClientIDs
-// registry, "auth_code" is returned with source "inferred" (CR-0067). The
-// well-known first-party app registrations (notably Microsoft Office,
-// d3590ed6-52b3-4102-aeff-aad2292ab01c) register the
-// https://login.microsoftonline.com/common/oauth2/nativeclient redirect URI
-// that the auth_code flow uses, but do NOT register http://localhost, so the
-// browser flow fails against them with AADSTS50011 (see CR-0030). Device code
-// was the previous inference, but it cannot be completed by an LLM agent on
-// the user's behalf: it requires a human to read a code and type it into a
-// separate page, which stalls every unattended session. The auth_code flow
-// can be completed in-band through MCP elicitation or the
-// system.complete_auth verb, so it is the friction-minimal default.
+// registry, "device_code" is returned with source "inferred". It is the only
+// flow that completes against the first-party app registrations, both
+// alternatives having been tested live against Microsoft Office
+// (d3590ed6-52b3-4102-aeff-aad2292ab01c) and rejected:
+//
+//   - "browser" fails outright. The app registration does not include an
+//     http://localhost redirect URI, so Entra ID rejects the sign-in with
+//     AADSTS50011 (see CR-0030, confirmed live under CR-0067).
+//   - "auth_code" no longer completes. Microsoft now interposes an
+//     anti-phishing interstitial on the nativeclient redirect page warning the
+//     user not to copy the URL, then refuses with "You have reached the wrong
+//     page". Copying an authorization code out of the address bar is
+//     indistinguishable from the phishing pattern the platform is hardening
+//     against, so a default must not instruct users to do it (CR-0067).
+//
+// device_code does require the user to approve a code out of band, which is
+// why CR-0067 invests in making that path cheap: a silent refresh is attempted
+// before any prompt, and the code is presented as a one-click link.
+// "auth_code" remains fully supported for tenants where it works, via an
+// explicit OUTLOOK_MCP_AUTH_METHOD.
 //
 // When the client ID is a custom value (not in the well-known registry),
 // "browser" is returned with source "default" because custom app
@@ -361,7 +370,7 @@ func InferAuthMethod(clientID, explicitAuthMethod string) (string, string) {
 
 	for _, uuid := range WellKnownClientIDs {
 		if strings.EqualFold(clientID, uuid) {
-			return "auth_code", "inferred"
+			return "device_code", "inferred"
 		}
 	}
 

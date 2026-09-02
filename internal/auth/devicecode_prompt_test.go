@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -67,4 +68,32 @@ func TestDeviceCodePrompt_OneClickURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDeviceCodePrompt_FallbackText verifies the text most users actually see:
+// the Entra ID message verbatim (CR-0031 FR-2) plus a one-click link.
+func TestDeviceCodePrompt_FallbackText(t *testing.T) {
+	const msg = "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD1234 to authenticate."
+
+	t.Run("message is reproduced verbatim with the link appended", func(t *testing.T) {
+		got := DeviceCodePrompt{
+			Message:         msg,
+			UserCode:        "ABCD1234",
+			VerificationURL: "https://microsoft.com/devicelogin",
+		}.FallbackText()
+
+		if !strings.HasPrefix(got, msg) {
+			t.Errorf("FallbackText() = %q, want it to start with the verbatim Entra message", got)
+		}
+		if !strings.Contains(got, "https://microsoft.com/devicelogin?otc=ABCD1234") {
+			t.Errorf("FallbackText() = %q, want the one-click link appended", got)
+		}
+	})
+
+	t.Run("no user code yields the bare message", func(t *testing.T) {
+		got := DeviceCodePrompt{Message: msg}.FallbackText()
+		if got != msg {
+			t.Errorf("FallbackText() = %q, want exactly the message when there is no code to embed", got)
+		}
+	})
 }

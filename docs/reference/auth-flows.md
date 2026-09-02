@@ -15,10 +15,10 @@ This choice constrains which flows can work:
 | Redirect URI | Registered on the MS Office app? | Consequence |
 |---|---|---|
 | `http://localhost:<port>` | No | The `browser` flow fails with `AADSTS50011` |
-| `https://login.microsoftonline.com/common/oauth2/nativeclient` | Yes | The `auth_code` flow works |
+| `https://login.microsoftonline.com/common/oauth2/nativeclient` | Yes | Registered, but the `auth_code` flow is now blocked by an anti-phishing interstitial on that page |
 | *(none — device code grant)* | n/a | The `device_code` flow works, subject to Conditional Access |
 
-Full analysis in [CR-0030](../cr/CR-0030-manual-auth-code-flow.md).
+Net result: `device_code` is the only flow that completes against these client IDs. Original analysis in [CR-0030](../cr/CR-0030-manual-auth-code-flow.md); the `auth_code` regression and the live `AADSTS50011` re-confirmation are recorded in [CR-0067](../cr/CR-0067-authentication-resilience-and-in-band-recovery.md).
 
 ### Tenant ID configuration
 
@@ -38,10 +38,17 @@ Full analysis in [CR-0030](../cr/CR-0030-manual-auth-code-flow.md).
 | Condition | Method | Source |
 |---|---|---|
 | `OUTLOOK_MCP_AUTH_METHOD` set | that value | `explicit` |
-| Client ID is in `config.WellKnownClientIDs` | `auth_code` | `inferred` |
+| Client ID is in `config.WellKnownClientIDs` | `device_code` | `inferred` |
 | Anything else (custom app registration) | `browser` | `default` |
 
-The inferred value was `device_code` until CR-0067. It changed because device code cannot be completed in band: it needs a human to read a code and approve it on a separate page, which stalls unattended sessions. `auth_code` returns a value (the redirect URL) that the user can paste back through the same conversation. `device_code` remains fully supported and is selected by setting the environment variable explicitly.
+`device_code` is inferred for the first-party client IDs because it is the only flow that completes against them. CR-0067 trialled `auth_code` as the inferred default and reverted it on live evidence:
+
+* **`browser`** — `AADSTS50011`, confirmed end to end with `http://localhost:65053`. The app registration has no localhost redirect URI.
+* **`auth_code`** — Microsoft now shows an anti-phishing interstitial on the `nativeclient` redirect page ("The URL contains your password... do not copy or share the URL with anyone") and then refuses with "You have reached the wrong page". Copying an authorization code out of the address bar is the pattern being hardened against.
+
+Both remain fully implemented. `auth_code` is selectable explicitly and may work against a custom app registration; `browser` is the correct default for one.
+
+> **Testing caution.** A `curl` against `/authorize` with an unregistered `redirect_uri` still renders a login page. Entra ID defers redirect URI validation until after authentication, so a successful page render proves nothing. Only a completed sign-in surfaces `AADSTS50011`. This produced a false negative during the CR-0067 investigation.
 
 Per-account methods override the server default. `AccountEntry.AuthMethod` is persisted in `accounts.json` and is authoritative for that account; `auth.inferAuthMethod(entry)` falls back to inspecting the credential type only when the field is empty.
 
@@ -143,13 +150,15 @@ sequenceDiagram
     MW->>MW: retry original tool call
 ```
 
-`system.complete_auth` is registered unconditionally (CR-0067). When the target account is not running `auth_code`, `tools.completeAuthUnavailable` returns the recovery path that does apply rather than an internal type error.
+`system.complete_auth` is registered unconditionally (CR-0067), so it does not disappear when the active method changes. When the target account is not running `auth_code`, `tools.completeAuthUnavailable` returns the recovery path that does apply rather than an internal type error.
+
+**Status:** this flow is implemented and selectable but is no longer inferred. Against the first-party client IDs the redirect page now interposes an anti-phishing warning and the exchange does not complete; see Method selection above.
 
 ## Flow: `browser`
 
 `handleBrowserAuth` announces the login page via URL elicitation (falling back to a log notification), then runs `Authenticate` in a background goroutine (bounded by `backgroundAuthTimeout`, 300s) while waiting up to `browserTimeout` (120s default) for it to finish. `InteractiveBrowserCredential` opens the system browser and listens on a localhost port. On success the original tool call is retried.
 
-## Flow: `device_code`
+## Flow: `device_code` (the default)
 
 `handleDeviceCodeAuth` starts `Authenticate` in a background goroutine with a `chan DeviceCodePrompt` in the context under `DeviceCodeMsgKey`. The credential's `UserPrompt` callback (`deviceCodeUserPrompt`) forwards the whole `azidentity.DeviceCodeMessage` — not just its rendered sentence — so the receiver can build a one-click URL.
 
@@ -158,7 +167,7 @@ sequenceDiagram
 1. Composes `DeviceCodePrompt.OneClickURL()` — the verification URL with `?otc=<UserCode>`, which pre-fills the code box on the device login page.
 2. Requests a **URL mode** elicitation for that link.
 3. On acknowledgement, waits (bounded by `browserTimeout`) for the background attempt and retries the original tool call.
-4. On any elicitation error — including `ErrElicitationNotSupported` — returns `prompt.Message` **verbatim** as tool text. Per [CR-0031](../cr/CR-0031-elicitation-fallback.md), some clients answer elicitation with "Method not found" and this text is the only channel that reaches the user. It must not be reworded.
+4. On any elicitation error — including `ErrElicitationNotSupported` — returns `prompt.FallbackText()`: the Entra ID message **verbatim**, followed by the same one-click link. Per [CR-0031](../cr/CR-0031-elicitation-fallback.md), some clients answer elicitation with "Method not found" and this text is the only channel that reaches the user, so the message must never be reworded or dropped; the link is additive. Since `device_code` is the inferred default and many clients cannot elicit, this is the sign-in surface most users actually see.
 
 ---
 
@@ -178,7 +187,7 @@ sequenceDiagram
 
 ## Token storage
 
-Three distinct stores are in play. Knowing which flow writes which one explains the one-time re-authentication after CR-0067.
+Three distinct stores are in play. Knowing which flow writes which one explains why switching a running installation between `auth_code` and the other two methods costs one interactive sign-in.
 
 ### 1. azidentity persistent cache
 
@@ -186,7 +195,7 @@ Three distinct stores are in play. Knowing which flow writes which one explains 
 
 ### 2. MSAL cache blob (`auth_code` only)
 
-`AuthCodeCredential` uses MSAL Go's own cache accessor via `InitMSALCache`, stored under `{cfg.CacheName}_msal.bin`. It is **separate** from store 1. A token cached by the `device_code` credential is therefore invisible to the `auth_code` credential and vice versa — which is why changing the inferred default costs exactly one interactive sign-in per account.
+`AuthCodeCredential` uses MSAL Go's own cache accessor via `InitMSALCache`, stored under `{cfg.CacheName}_msal.bin`. It is **separate** from store 1. A token cached by the `device_code` credential is therefore invisible to the `auth_code` credential and vice versa, so setting `OUTLOOK_MCP_AUTH_METHOD=auth_code` on an existing installation costs one interactive sign-in per account. CR-0067 leaves the inferred default alone, so no upgrade triggers this.
 
 ### 3. Authentication record
 

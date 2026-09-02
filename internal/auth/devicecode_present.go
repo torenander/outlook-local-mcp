@@ -32,11 +32,13 @@ const deviceCodeElicitMessage = "Authentication required. Open this link to fini
 // login page with the user code pre-filled via the "otc" query parameter, so
 // the user clicks a link instead of transcribing a code (CR-0067 A7).
 //
-// When the client does not support elicitation the prompt's verbatim message
-// is returned as plain text. That fallback is deliberate and must not be
-// reworded: per CR-0031, clients such as Claude Code answer elicitation
-// requests with "Method not found", and the tool result text is then the only
-// channel that reaches the user at all.
+// When the client does not support elicitation, DeviceCodePrompt.FallbackText
+// is returned as plain text: the Entra ID message verbatim, plus the same
+// one-click link below it. That fallback carries most of the real traffic —
+// per CR-0031, clients such as Claude Code answer elicitation requests with
+// "Method not found", and the tool result text is then the only channel that
+// reaches the user at all — so the Entra sentence must never be reworded or
+// dropped.
 //
 // Parameters:
 //   - ctx: the tool handler context, used for elicitation and for the retry.
@@ -66,13 +68,13 @@ func (s *authMiddlewareState) presentDeviceCode(
 		} else {
 			slog.Warn("device code elicitation failed, returning as text", "error", err)
 		}
-		return mcp.NewToolResultText(prompt.Message)
+		return mcp.NewToolResultText(prompt.FallbackText())
 	}
 
 	if result == nil || result.Action != mcp.ElicitationResponseActionAccept {
 		// Declined or cancelled: still hand back the instructions so the user
 		// can complete the sign-in later without starting over.
-		return mcp.NewToolResultText(prompt.Message)
+		return mcp.NewToolResultText(prompt.FallbackText())
 	}
 
 	// The user says they have opened the link. Wait for the background flow to
@@ -119,6 +121,6 @@ func (s *authMiddlewareState) awaitDeviceCodeCompletion(
 		// Sign-in is still outstanding. Leave the background flow running and
 		// return the instructions so the user can finish; the next tool call
 		// picks up the completed authentication at middleware entry.
-		return mcp.NewToolResultText(prompt.Message)
+		return mcp.NewToolResultText(prompt.FallbackText())
 	}
 }

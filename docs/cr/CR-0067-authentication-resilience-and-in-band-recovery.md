@@ -1,6 +1,6 @@
 ---
-name: authentication-resilience-and-in-band-recovery
-description: Remove the authentication friction that repeatedly interrupts LLM sessions by trying silent token refresh before any interactive flow, inferring auth_code instead of device_code for well-known client IDs, keeping the account and complete_auth recovery verbs reachable at all times, correcting the recovery guidance the middleware emits, targeting re-authentication at the account the call actually used, and presenting device codes as one-click links.
+name: authentication-resilience-and-recovery
+description: Remove the authentication friction that repeatedly interrupts LLM sessions by trying silent token refresh before any interactive flow, keeping the account and complete_auth recovery verbs reachable at all times, correcting the recovery guidance the middleware emits, targeting re-authentication at the account the call actually used, and presenting device codes as one-click links. device_code remains the inferred default; auth_code was trialled as the default and rejected on live evidence.
 id: "CR-0067"
 status: "proposed"
 date: 2026-08-31
@@ -12,19 +12,25 @@ source-branch: feat/cr-0067-auth-resilience
 source-commit: 5b22fb5
 ---
 
-# Authentication resilience and in-band recovery
+# Authentication resilience and recovery
 
 ## Change Summary
 
-A default installation of `outlook-local-mcp` cannot complete authentication without a human stepping outside the conversation, and once authentication is in a bad state the server hides the very verbs that would repair it. This CR fixes the chain end to end: the middleware attempts a silent token refresh before starting any user-visible flow; well-known client IDs infer `auth_code` rather than `device_code`; `system.complete_auth` is always registered; the `account` verbs stay callable while an authentication flow is pending; the recovery guidance the server emits names verbs that actually re-authenticate an existing account; re-authentication targets the account the failing tool call resolved to instead of the server default; and a device code, when one is used, is presented as a one-click link with the code already filled in.
+Authentication in `outlook-local-mcp` prompts far more often than it needs to, and when it does go wrong the server hides the very verbs that would repair it. This CR fixes that chain: the middleware attempts a silent token refresh before starting any user-visible flow, and the credentials are reconfigured so that such a refresh is possible at all; `system.complete_auth` is always registered; the `account` verbs stay callable while an authentication flow is pending; the recovery guidance the server emits names verbs that actually re-authenticate an existing account; re-authentication targets the account the failing tool call resolved to instead of the server default; and the device code is presented as a one-click link with the code already filled in.
 
-> **Migration cost.** Existing installations that relied on the inferred default will be asked to sign in **once per account** after upgrading. The `auth_code` credential keeps its tokens in a separate MSAL cache blob (`{cache-name}_msal.bin`) from the azidentity keychain entry that `device_code` and `browser` use, so a token cached under the old default is not visible to the new one. Accounts already recorded in `accounts.json` carry a persisted `auth_method` and keep `device_code` until they are re-registered. Setting `OUTLOOK_MCP_AUTH_METHOD=device_code` pins the previous behaviour and avoids the re-authentication entirely. See [Migration cost](#migration-cost) below.
+**The inferred default remains `device_code`.** An earlier revision of this CR changed it to `auth_code`. Live testing killed that premise — Microsoft now blocks the copy-the-URL-from-the-address-bar pattern with an anti-phishing interstitial — and it has been reverted. The same testing also re-confirmed, first-hand, that `browser` fails against the shipped client ID with `AADSTS50011`. `device_code` is the only flow that completes. Both findings are recorded under [Rejected alternatives](#rejected-alternatives), because the next person to look at this will have the same idea we did.
+
+That makes the rest of the CR more important, not less. If the user must approve a device code, then every prompt we can avoid is worth avoiding, and every prompt we cannot avoid should be one click rather than a transcription exercise. That is A1 and A7 respectively.
+
+> **Migration cost: none.** Because the inferred default is unchanged, no existing installation is asked to re-authenticate. Tokens stay where they are. This is a change in the CR's risk profile from its earlier revision, which would have forced one interactive sign-in per account. See [Migration cost](#migration-cost).
 
 ## Motivation and Background
 
-The friction is not one bug; it is six defects that compound into a flow no assistant can finish unaided. Each was verified against `main` at commit `5b22fb5`.
+The friction is not one bug; it is a set of defects that compound. Each was verified against `main` at commit `5b22fb5`.
 
-**1. The shipped default requires a human, by construction.** `config.InferAuthMethod` returns `device_code` for any client ID in `WellKnownClientIDs`. The default client ID `outlook-desktop` = `d3590ed6-52b3-4102-aeff-aad2292ab01c` (Microsoft Office) is in that registry, so every out-of-the-box install runs device code. Device code cannot be completed by the assistant: it requires a person to read a code out of a tool result and type it into a page in another window. In an unattended or `claude -p` session there is nobody to do that, and the session stalls.
+**1. The shipped default needs a human at least once, and there is no way around it.** `config.InferAuthMethod` returns `device_code` for any client ID in `WellKnownClientIDs`, which includes the default `outlook-desktop` = `d3590ed6-52b3-4102-aeff-aad2292ab01c` (Microsoft Office). Device code requires a person to approve a code on a separate page, so an unattended session stalls there.
+
+The obvious response is to change the default. Both alternatives were tested live against that client ID and neither works: `browser` is rejected with `AADSTS50011`, and `auth_code` is blocked by a Microsoft anti-phishing interstitial (see [Rejected alternatives](#rejected-alternatives)). The default therefore stands, and the only available response is to make everything around it cost less — never prompt when the cache would have served (A1), and make the unavoidable prompt one click rather than a transcription exercise (A7).
 
 **2. The in-band alternative is unregistered exactly when it is needed.** `system.complete_auth` is only added to the system verb slice when `cfg.AuthMethod == "auth_code"` (`internal/server/system_verbs.go:212`). Under the default configuration the verb does not exist, so an assistant that has been told "finish the sign-in" discovers there is no verb to call. The per-account `auth_method` can also differ from the server default, so even a correctly configured server can be missing the verb for one of its accounts.
 
@@ -40,8 +46,8 @@ Individually each is survivable. Together they mean: the default install starts 
 
 ## Change Drivers
 
-* Unattended and headless sessions (`claude -p`, CI, Docker) cannot complete the default authentication flow at all.
-* Interactive sessions are interrupted by full sign-in prompts that a silent refresh would have avoided.
+* Interactive sessions are interrupted by full sign-in prompts that a silent refresh would have avoided — the largest source of friction, and entirely fixable.
+* The device code prompt, which cannot be eliminated, is presented as a code to transcribe rather than a link to click.
 * The self-repair surface (`account.*`, `system.complete_auth`) is unavailable precisely when authentication is broken.
 * Recovery guidance that names the wrong verb actively degrades the registry it is meant to repair.
 * A data race in the pending-auth bookkeeping that `go test -race` can surface.
@@ -51,7 +57,8 @@ Individually each is survivable. Together they mean: the default install starts 
 
 | Concern | Behaviour on `main` @ `5b22fb5` | Location |
 |---|---|---|
-| Inferred method for well-known client IDs | `device_code` | `internal/config/config.go:344` |
+| Inferred method for well-known client IDs | `device_code` (unchanged by this CR) | `internal/config/config.go:344` |
+| `GetToken` on a cache miss | Escalates: opens a browser or emits a device code, outside middleware control | `internal/auth/auth.go` (credential options) |
 | `system.complete_auth` registration | Only when `cfg.AuthMethod == "auth_code"` | `internal/server/system_verbs.go:212` |
 | Silent refresh before interactive | None | `internal/auth/middleware.go:210`, `:268` |
 | Verbs reachable during pending auth | None | `internal/auth/middleware.go:189-204` |
@@ -78,7 +85,7 @@ flowchart TD
     E --> I[AccountAuthFromContext -- always misses]
     I --> J[interactive flow on DEFAULT credential]
     J --> K{method}
-    K -->|device_code default| L[device code, no deadline]
+    K -->|device_code| L[device code, no deadline]
     L --> M[user must retype code elsewhere]
     E --> N[FormatAuthError: call account_add]
     N --> O[duplicate account created]
@@ -91,7 +98,7 @@ Seven changes, labelled A1-A7, implemented together because each removes one lin
 | ID | Change |
 |---|---|
 | A1 | Construct every azidentity credential with `DisableAutomaticAuthentication: true` so `GetToken` is silent-only, then attempt a bounded silent token acquisition before any interactive flow, on both the fresh-credential fast path and the auth-error path, for all three methods. |
-| A2 | `InferAuthMethod` returns `auth_code` (source `inferred`) for well-known client IDs. Explicit `OUTLOOK_MCP_AUTH_METHOD` still wins; custom client IDs still default to `browser`. |
+| A2 | *(withdrawn)* Changing the inferred default to `auth_code`. Implemented, tested live, reverted — see [Rejected alternatives](#rejected-alternatives). The identifier is retained so the labels here match the branch history. |
 | A3 | Register `system.complete_auth` unconditionally; when the target account is not on `auth_code`, return the recovery path that does apply. |
 | A4 | Exempt the `account` domain from the pending-auth freeze and the fresh-credential fast path; bound the device code background context at 300s; make the pending-auth bookkeeping race free. |
 | A5 | Rewrite the recovery guidance to be correct and method-aware; reorder `classifyAuthError` so specific detail survives. |
@@ -121,7 +128,7 @@ flowchart TD
     M -->|failure| O{method}
     O -->|auth_code| P[browser + elicit redirect URL, or system.complete_auth]
     O -->|browser| Q[browser, 120s]
-    O -->|device_code| R[one-click otc link, 300s bound]
+    O -->|device_code, the default| R[one-click otc link, 300s bound]
     R --> S[on ack: wait, then retry]
 ```
 
@@ -137,8 +144,8 @@ flowchart TD
 3c. `IsAuthError` **MUST** classify `azidentity.AuthenticationRequiredError` as an authentication error so it routes into the middleware, and `classifyAuthError` **MUST NOT** surface its SDK-level "Call Authenticate" advice to the LLM.
 3d. `probeStartupToken` **MUST** run for every auth method including `device_code`, so `preAuthenticated` reflects a real token check rather than the presence of an auth record file.
 4. On a successful silent acquisition the middleware **MUST** mark itself authenticated and retry the original tool call without prompting.
-5. `config.InferAuthMethod` **MUST** return `("auth_code", "inferred")` for client IDs present in `WellKnownClientIDs`.
-6. An explicit `OUTLOOK_MCP_AUTH_METHOD` **MUST** continue to win with source `explicit`, including the value `device_code`.
+5. `config.InferAuthMethod` **MUST** continue to return `("device_code", "inferred")` for client IDs present in `WellKnownClientIDs`. Its doc comment **MUST** record why the two alternatives were rejected, so the decision is not silently re-litigated.
+6. An explicit `OUTLOOK_MCP_AUTH_METHOD` **MUST** continue to win with source `explicit`, including the value `auth_code`, which remains fully supported for tenants where it works.
 7. Custom (non-well-known) client IDs **MUST** continue to return `("browser", "default")`.
 8. `system.complete_auth` **MUST** be registered regardless of the active authentication method.
 9. When `system.complete_auth` is invoked against a credential that does not implement `AuthCodeFlow`, the handler **MUST** return a message naming the recovery path for the method that account actually uses, and **MUST NOT** report an internal type error.
@@ -154,7 +161,7 @@ flowchart TD
 19. `auth.inferAuthMethod(entry)` **MUST** honour a persisted `AccountEntry.AuthMethod` and, when it is empty, **MUST** distinguish `*azidentity.DeviceCodeCredential` from the browser case.
 20. `presentDeviceCode` **MUST** use URL-mode elicitation with a link of the form `https://microsoft.com/devicelogin?otc=<UserCode>`.
 21. The structured device code message (`UserCode`, `VerificationURL`, `Message`) **MUST** be forwarded through `DeviceCodeMsgKey`, not just the rendered sentence.
-22. When elicitation is unavailable or fails, the device code prompt **MUST** be returned as tool result text **verbatim**, preserving the CR-0031 fallback contract.
+22. When elicitation is unavailable or fails, the tool result text **MUST** reproduce the Entra ID device code message verbatim, preserving the CR-0031 fallback contract. It **MAY** append the one-click link below that message, and **MUST NOT** reword or omit the message itself. Because `device_code` is the inferred default and many clients cannot render elicitations, this text is the primary sign-in surface and is specified as such rather than as a degraded path.
 23. After a successful elicitation acknowledgement, `presentDeviceCode` **MUST** wait (bounded) for the background flow to finish and then retry the original tool call.
 
 ### Non-Functional Requirements
@@ -166,28 +173,22 @@ flowchart TD
 
 ## Migration cost
 
-This is the one user-visible cost of the CR and it is deliberate.
+**None.** The inferred default is unchanged, so no installation is asked to re-authenticate and every cached token keeps working.
 
-**What happens.** After upgrading, an installation that relied on the inferred default and has no `OUTLOOK_MCP_AUTH_METHOD` set will run `auth_code` where it previously ran `device_code`. The first tool call will ask the user to sign in.
-
-**Why a cached token does not carry over.** The two methods use different token stores:
+This is a deliberate improvement over the earlier revision of this CR, which changed the default to `auth_code` and therefore *would* have forced one interactive sign-in per account. That cost existed because the two flows use different token stores:
 
 | Method | Credential | Token store |
 |---|---|---|
 | `device_code`, `browser` | `azidentity.DeviceCodeCredential` / `InteractiveBrowserCredential` | `azidentity/cache` entry named `cfg.CacheName` (OS keychain / libsecret / DPAPI, or the encrypted file backend) |
 | `auth_code` | `auth.AuthCodeCredential` (MSAL Go `public.Client`) | its own MSAL cache blob, `{cfg.CacheName}_msal.bin`, via `InitMSALCache` |
 
-They are separate blobs with separate serialisation. There is no supported way to import one into the other, and attempting it would mean hand-decoding MSAL's on-disk format.
+Those blobs are separate and not interchangeable, so switching a running installation between the two groups costs one sign-in. That remains true for anyone who sets `OUTLOOK_MCP_AUTH_METHOD=auth_code` by hand, and is worth knowing — but this CR does not do it to anybody.
 
-**How large the cost is.** Exactly one interactive sign-in per account, once. After that, tokens renew silently — and thanks to A1 they renew more reliably than before.
+Behaviour that *does* change for existing users, without requiring re-authentication:
 
-**What limits the blast radius.**
-
-* Accounts already persisted in `accounts.json` carry an `auth_method` field. `RestoreAccounts` rebuilds them with that method, so an account registered as `device_code` **keeps** `device_code` after the upgrade and is not affected at all. Only the server default changes.
-* Setting `OUTLOOK_MCP_AUTH_METHOD=device_code` restores the previous behaviour completely.
-* The re-authentication is a normal `account.login`, which the assistant can now drive end to end — which is the point of the change.
-
-The recovery procedure is documented at [troubleshooting#reauth-after-upgrade](../troubleshooting.md#reauth-after-upgrade).
+* `GetToken` no longer escalates. An expired token now produces a coordinated middleware prompt instead of a browser window or device code appearing mid-request. See Risk 3a.
+* The startup probe now runs for `device_code`, so `preAuthenticated` reflects a real token check.
+* Device codes are presented as a one-click link where the client supports it, and the plain-text fallback gains the same link below the unchanged Entra message.
 
 ## Affected Components
 
@@ -217,7 +218,7 @@ The recovery procedure is documented at [troubleshooting#reauth-after-upgrade](.
 
 ### In Scope
 
-* A1-A7 as listed above.
+* A1 and A3-A7 as listed above. A2 was implemented and then withdrawn; the revert is part of this change set.
 * Test updates for every behaviour changed, plus new tests for each new behaviour.
 * The three documentation files named above and this CR.
 
@@ -229,24 +230,48 @@ The recovery procedure is documented at [troubleshooting#reauth-after-upgrade](.
 
 ## Rejected alternatives
 
-### Making `browser` the default for well-known client IDs
+Two of these were not rejected on paper — they were implemented, driven against a real Microsoft account, and abandoned on the evidence. Both are recorded in full because both look correct until you try them.
 
-`browser` is the flow with the best user experience — no code to transcribe, no URL to paste — so it is the obvious candidate. It cannot be the default, for a hard external reason.
+### Making `auth_code` the inferred default — TRIED, REVERTED (2026-09-02)
 
-`InteractiveBrowserCredential` starts a local HTTP listener on a random port and uses `http://localhost:<port>` as the OAuth redirect URI. The Microsoft Office app registration (`d3590ed6-52b3-4102-aeff-aad2292ab01c`), which is the shipped default client ID and the only well-known ID with `Calendars.ReadWrite` pre-authorized, **does not register `http://localhost` as a redirect URI**. Entra ID rejects the request outright:
+This was the original A2, and it shipped on this branch before being reverted. The reasoning was sound: `auth_code` uses the `nativeclient` redirect URI, which the Microsoft Office app registration *does* register (CR-0030), and it returns a value the user can paste back inside the conversation, so an assistant could drive it end to end.
+
+Microsoft has since closed that pattern. Driving a real sign-in through the flow this branch produced, the `nativeclient` redirect page now renders an anti-phishing interstitial:
+
+> "This page is not normally shown and could be a sign of a phishing attempt. The URL contains your password. Close this page immediately and do not copy or share the URL with anyone."
+
+followed by:
+
+> "This is not the right page. You have reached the wrong page. Please close this app or window and try again."
+
+The flow did not complete. This is not a transient bug to wait out: copying an authorization code out of the browser address bar is *behaviourally identical* to the phishing technique Microsoft is hardening against, and the interstitial exists to stop users doing it. A default that instructs the user to do precisely what the platform is warning them not to do is indefensible — it trains people to ignore a security warning, and it does not even work.
+
+CR-0030's design was correct when written. The platform moved underneath it.
+
+`auth_code` is **not** removed. It remains fully implemented and selectable with `OUTLOOK_MCP_AUTH_METHOD=auth_code`, for tenants or future platform states where it completes. It is simply no longer inferred.
+
+### Making `browser` the inferred default — RE-TESTED, STILL DEAD (2026-09-02)
+
+CR-0030 rejected `browser` because the Microsoft Office app registration has no `http://localhost` redirect URI. With `auth_code` newly unavailable, this was reopened rather than taken on trust, and the rejection is now backed by first-hand evidence rather than a citation:
 
 ```
-AADSTS50011: The redirect URI 'http://localhost:<port>' specified in the request
-does not match the redirect URIs configured for the application.
+AADSTS50011: The redirect URI 'http://localhost:65053' specified in the request does not
+match the redirect URIs configured for the application 'd3590ed6-52b3-4102-aeff-aad2292ab01c'.
 ```
 
-This is documented in [CR-0030](CR-0030-manual-auth-code-flow.md) and is the original reason the `auth_code` method exists. The same app registration *does* include `https://login.microsoftonline.com/common/oauth2/nativeclient`, which is exactly what `auth_code` uses. Defaulting well-known client IDs to `browser` would therefore ship a configuration that fails on its first tool call, for every user, with an error that looks like a misconfiguration on their side.
+`InteractiveBrowserCredential` binds a random localhost port, so the specific port varies, but every one of them is unregistered. `browser` remains correct for **custom** app registrations, which normally do register a localhost redirect URI — that behaviour is unchanged.
 
-`browser` remains the correct default for **custom** app registrations, which normally do register a localhost redirect URI — and that is unchanged by this CR.
+#### Methodology caution: the authorize endpoint does not validate `redirect_uri` up front
 
-### Keeping `device_code` as the default and only fixing the surrounding friction
+Worth recording, because it produced a false negative during this investigation and will do so again.
 
-Considered and rejected. A1, A3, A4, A5 and A7 all make device code materially better, and the one-click `otc` link removes the transcription step. But the flow still terminates in a human approving a sign-in on a page the assistant cannot reach. No amount of surrounding polish makes it completable in an unattended session, which is the failure this CR exists to remove. Device code stays fully supported and one environment variable away.
+An initial probe issued `curl` requests to the `/authorize` endpoint with `redirect_uri=http://localhost` and `redirect_uri=http://localhost:12345`. Both returned a rendered Microsoft login page and no error, which was read as "the redirect URIs are accepted". **That conclusion was wrong.** Entra ID defers `redirect_uri` validation until after authentication; the initial page render says nothing about whether the URI is registered. Only completing a real sign-in surfaces `AADSTS50011`.
+
+**Do not use an authorize-endpoint page render to test redirect URI acceptance.** The only reliable test is an end-to-end sign-in.
+
+### Keeping `device_code` as the default and doing nothing else
+
+Rejected, and the reason this CR exists. Device code is the only flow that completes, but the surrounding experience was needlessly bad: a prompt on every expired access token even when the refresh credential was live, a session frozen against its own recovery verbs while a prompt was outstanding, guidance that told the LLM to create a duplicate account, and a code to be transcribed by hand. Those are all fixable without touching the flow itself, and A1 and A7 in particular are what make an unavoidable device code cheap rather than painful.
 
 ### Probing credentials with `GetToken` without disabling automatic authentication
 
@@ -266,15 +291,15 @@ The type-system-pure alternative to the allowlist: wrap each azidentity credenti
 
 ### User Impact
 
-Positive in steady state: fewer prompts, and the prompts that remain can be completed inside the conversation. One-off negative: a single re-authentication per account on upgrade, described above and pinnable with one environment variable.
+Positive and free: fewer prompts, and the prompts that remain are a link rather than a code to copy. No re-authentication, no configuration change, no behavioural surprise on upgrade. The one thing users do *not* get is unattended first sign-in, which the platform does not currently permit for this client ID.
 
 ### Technical Impact
 
-Removes a data race. Removes an unbounded background context. Corrects a multi-account correctness bug that silently signed in the wrong account. Adds six small files to `internal/auth` and one to `internal/tools`; `middleware.go` shrinks.
+Removes a data race. Removes two unbounded background contexts. Corrects a multi-account bug that silently re-authenticated the wrong account. Stops the Graph SDK escalating to interactive auth outside middleware control. Adds six small files to `internal/auth` and one to `internal/tools`; `middleware.go` shrinks.
 
 ### Business Impact
 
-Makes the server usable in unattended and headless contexts, which is where an MCP server spends most of its life.
+Reduces the interruption rate of the dominant authentication path, and records the platform constraints that bound it so the same dead ends are not explored again.
 
 ## Implementation Approach
 
@@ -288,9 +313,9 @@ Verified consequences of the flag:
 * The resulting `AuthenticationRequiredError` message begins with the credential name — literally `"DeviceCodeCredential"` or `"InteractiveBrowserCredential"` — both of which are already in `authErrorPatterns`, so `IsAuthError` classifies it without change. A regression test pins this.
 * The Graph SDK's bearer-token policy now receives that error instead of triggering a prompt mid-request, and the error routes into `AuthMiddleware`, which is the designed prompt path.
 
-### A2: Infer `auth_code` for well-known client IDs
+### A2: Infer `auth_code` for well-known client IDs — WITHDRAWN
 
-One-line change in `InferAuthMethod` plus the doc comment that justified `device_code`. Update `config_test.go`.
+Implemented as a one-line change to `InferAuthMethod` plus test updates, then reverted after live testing (see [Rejected alternatives](#rejected-alternatives)). The net code change is that `InferAuthMethod` still returns `("device_code", "inferred")`; what it gains is a doc comment recording the two rejected alternatives and their evidence, so the next reader does not repeat the experiment blind.
 
 ### A3: Always register `system.complete_auth`
 
@@ -341,9 +366,9 @@ None.
 
 A probe-eligible credential with a warm cache causes the original tool call to be retried with no authentication flow started, on both the fast path and the auth-error path. An unrecognised credential with a `GetToken` method is never called. `SetupCredential` returns credentials whose `GetToken` yields `azidentity.AuthenticationRequiredError` on a cache miss for both `browser` and `device_code`, `IsAuthError` classifies that error as authentication-related, and `classifyAuthError` does not surface its "Call Authenticate" text. `probeStartupToken` calls `GetToken` for `device_code` and marks pre-authenticated only on success.
 
-### AC-2: Default inference is `auth_code`
+### AC-2: Default inference is unchanged and its rationale is recorded
 
-`InferAuthMethod("d3590ed6-...", "")` returns `("auth_code", "inferred")`. `InferAuthMethod("d3590ed6-...", "device_code")` returns `("device_code", "explicit")`. `InferAuthMethod("<custom-uuid>", "")` returns `("browser", "default")`.
+`InferAuthMethod("d3590ed6-...", "")` returns `("device_code", "inferred")`. `InferAuthMethod("d3590ed6-...", "auth_code")` returns `("auth_code", "explicit")`. `InferAuthMethod("<custom-uuid>", "")` returns `("browser", "default")`. The `InferAuthMethod` doc comment names both rejected alternatives and the errors that rejected them. No existing installation is prompted to re-authenticate on upgrade.
 
 ### AC-3: `complete_auth` always exists and always answers usefully
 
@@ -363,7 +388,7 @@ With one registered account whose authenticator differs from the closure credent
 
 ### AC-7: Device code is one click, with the fallback intact
 
-URL elicitation is called with a URL containing `otc=<UserCode>`. On acceptance the original tool call is retried. On `ErrElicitationNotSupported` the tool result text equals the Entra ID message verbatim.
+URL elicitation is called with a URL containing `otc=<UserCode>`. On acceptance the original tool call is retried. On `ErrElicitationNotSupported` the tool result text begins with the Entra ID message reproduced verbatim and carries the same one-click link below it; with no user code available it is exactly the message and nothing else.
 
 ## Quality Standards Compliance
 
@@ -381,13 +406,13 @@ Per the AGENTS.md documentation governance rules: per-verb reference for `comple
 
 ## Risks and Mitigation
 
-### Risk 1: Users are surprised by the re-authentication prompt
+### Risk 1: `device_code` remains unattendable
 
-**Mitigation:** A dedicated troubleshooting entry with a stable anchor (`#reauth-after-upgrade`), a prominent note in this CR, and a one-variable opt-out. The prompt itself is now completable in band, which is the compensating benefit.
+**Not mitigated, and not mitigable at this layer.** With `browser` and `auth_code` both unavailable against the first-party client ID, a fully unattended first sign-in is not possible. What this CR does is ensure it is required as rarely as possible (A1: silent refresh before every prompt) and is as cheap as possible when required (A7: one click, not a transcription). Operators who need true unattended startup must register their own application with a localhost redirect URI and set `OUTLOOK_MCP_CLIENT_ID`, which routes them to `browser` via the existing `default` inference.
 
-### Risk 2: `auth_code` is a worse fit for some environment than `device_code`
+### Risk 2: The platform moves again and `auth_code` becomes viable, or `device_code` stops being
 
-**Mitigation:** `device_code` is unchanged in capability and is one environment variable away. A1, A4, A5 and A7 improve it regardless of which is the default.
+**Mitigation:** The inference is one function with a doc comment naming the evidence for each rejected option, and all three flows remain fully implemented and selectable. Revisiting the decision is a one-line change plus a test, not a re-implementation. The methodology caution under Rejected alternatives records how to test it properly.
 
 ### Risk 3: The silent refresh adds latency to the auth-error path
 
@@ -424,11 +449,11 @@ Medium. Seven coupled changes in one package plus mechanical test updates across
 
 ## Decision Outcome
 
-Proposed.
+Proposed. A2 (inferring `auth_code`) is explicitly withdrawn on live evidence; the remainder stands.
 
 ## Implementation Status
 
-Proposed — not yet accepted.
+Proposed — not yet accepted. A1 and A3-A7 are implemented on `feat/cr-0067-auth-resilience`. A2 was implemented and reverted on the same branch; the history is retained deliberately so the trial and its outcome are visible.
 
 ## Related Items
 

@@ -20,11 +20,11 @@ Counts:
 
 - Work items: 6/6 PASS, 1 WITHDRAWN (A2)
 - Functional Requirements: 30/30 PASS (FR-5/6/7 restated after the A2 revert)
-- Non-Functional Requirements: 3/4 PASS, **1 PARTIAL (NFR-27)**
+- Non-Functional Requirements: 4/4 PASS
 - Acceptance Criteria: 7/7 PASS
 - Tests added: 28 PASS; tests modified: 6 files
 - Gate: `make docs-bundle build vet fmt-check tidy test` PASS, `go test -race ./...` PASS (14/14), `golangci-lint` 0 issues
-- Gaps: 4 — one requirement partially met (NFR-27) and three unit-tested-only items. 2 follow-ups recorded.
+- Gaps: 3 — three unit-tested-only items. NFR-27 was PARTIAL and is now met; 2 follow-ups recorded.
 
 ## Verification tier
 
@@ -78,7 +78,7 @@ This is the most important table in the report. "Live" means exercised against a
 | NFR-24 | No new top-level MCP tool | `internal/server/*_verbs.go` | Live: 4 aggregate tools | PASS |
 | NFR-25 | `system` aggregate annotations stay conservative | `internal/server/system_verbs.go` | `TestToolAnnotations_System` — unchanged, already assumed `complete_auth` | PASS |
 | NFR-26 | `go test -race ./...` passes | — | 14/14, no races | PASS |
-| NFR-27 | Small single-purpose files; `middleware.go` must not grow | 7 new files in `internal/auth` | **`middleware.go` 804 → 833 lines (+29)** | **PARTIAL — see Gaps** |
+| NFR-27 | Small single-purpose files; `middleware.go` must not grow | 9 new files in `internal/auth` | **`middleware.go` 804 → 637 lines (−167)** after `handleBrowserAuth` and `handleDeviceCodeAuth` moved to `browser_flow.go` and `devicecode_flow.go` | PASS |
 
 ## Acceptance Criteria Verification
 
@@ -279,7 +279,7 @@ New files (8 production, 4 test):
 
 ## Gaps
 
-1. **NFR-27 is only half met — `middleware.go` grew.** The requirement said it must not. Seven cohesive pieces were split into their own files and `presentDeviceCode` (~40 lines) was moved out, but the entry-point restructure, the silent-refresh call sites, the in-flight bracketing and their doc comments added more than that came out: **804 → 833 lines, +29 net**. The stated intent — no monolith growth — was not achieved, and reporting it as PASS would have been false. The remedy is mechanical and deliberately deferred rather than attempted at validation time: move `handleBrowserAuth` and `handleDeviceCodeAuth` into their own files, which would take the file well below its original size. Recorded as a follow-up.
+1. ~~**NFR-27 is only half met — `middleware.go` grew.**~~ **Resolved.** At validation time seven cohesive pieces had been split out and `presentDeviceCode` (~40 lines) moved, but the entry-point restructure, the silent-refresh call sites, the in-flight bracketing and their doc comments added more than came out: 804 → 833 lines, +29 net. Reporting that as PASS would have been false, so the mechanical remedy was deferred. It has since been applied: `handleBrowserAuth` and `handleDeviceCodeAuth` now live in `browser_flow.go` and `devicecode_flow.go`, leaving `middleware.go` at **637 lines, 167 below its original size**. The move was verified to be pure — all 178 lines that left `middleware.go` reappear in the new files and none were added — with the full gate, `go test -race ./...` and `golangci-lint` (0 issues) re-run after it.
 2. **A5 guidance is unit-tested only.** The wording is asserted, but no live session has confirmed that an LLM handed the new guidance actually recovers. Cheap to check during the next real re-auth.
 3. **A6 is unit-tested only.** Verifying that re-auth targets the correct account requires a **second** Microsoft account. The unit test asserts the account credential is used and the closure credential is not, which is the whole mechanism, but the wiring has never run live.
 4. **URL-mode elicitation `Accept` path is unit-tested only.** No client is known to answer URL-mode elicitation with `Accept`. If none does in practice, A7's ack→wait→retry branch is dead code in the field and the plain-text fallback is the entire user experience — which is why FR-22 specifies that fallback as the primary surface rather than a degraded one.

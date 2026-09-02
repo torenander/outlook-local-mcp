@@ -97,10 +97,22 @@ on the mock.
 
 ### Verified against a live Microsoft 365 mailbox
 
-CRUD run `2026-08-31T19-27-32`, executed by the requestor against an
-integrated build of this branch. The run predates this report, so its row is
-not yet in `docs/bench/crud-runs.csv`; the benchmark run that appends there is
-being held until this report lands, so that it measures final code.
+CRUD run `2026-08-31T19-27-32`, executed by the requestor against a binary
+built from an integration merge that already contained this branch's final
+commit. The run therefore verifies the code as shipped, not an earlier state:
+
+| Event | Time |
+|---|---|
+| `c390518` accept natural-language folder references | 2026-08-31 15:36:32 |
+| `e21574c` distinguish unexplored from withheld subfolders | 2026-08-31 19:19:17 |
+| CRUD run start | 2026-08-31 19:27:32 (8 minutes later) |
+
+That ordering is why the run's report shows Step 30f passing (added in
+`c390518`) and the `[1 subfolder hidden]` rendering (added in `e21574c`).
+
+The run's row in `docs/bench/crud-runs.csv` is **not** on this branch. It is
+committed on `fix/crud-test-implicit-default` (PR #4), which owns the harness
+tooling and against whose merge of all three branches the run was executed.
 
 | Behaviour | Result |
 |---|---|

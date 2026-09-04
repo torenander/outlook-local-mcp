@@ -2,7 +2,7 @@
 // for the create_event, update_event, create_meeting and update_meeting verbs,
 // which all route through HandleCreateEvent or HandleUpdateEvent.
 //
-// Before the body_type parameter existed, the content type was guessed from
+// Before the content_type parameter existed, the content type was guessed from
 // strings.Contains(body, "<") alone. The guess is wrong in both directions and
 // fails silently either way: escaped HTML ("&lt;p&gt;") contains no literal "<"
 // and was sent as plain text, so the markup showed up as visible entities; and
@@ -21,10 +21,21 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
 
-// eventBodyTypeParam is the tool argument callers use to state the body type.
-const eventBodyTypeParam = "body_type"
+// eventContentTypeParam is the tool argument callers use to state the body type.
+//
+// Named to match the content_type parameter the mail draft verbs already ship
+// (internal/server/mail_verbs.go), since it is the same concept with the same
+// two values. It deliberately does not echo body_mode from CR-0068, which is a
+// different thing: how much of a body to fetch, not what type a body being
+// written is.
+//
+// One divergence to be aware of: the mail path's BuildDraftBody silently treats
+// any unrecognised content_type as text, whereas this returns an error. The
+// strict behaviour is the intended one; the mail path is the outlier and is
+// left alone here rather than changed under a calendar commit.
+const eventContentTypeParam = "content_type"
 
-// eventBodyType decides the Graph content type for an event body.
+// eventContentType decides the Graph content type for an event body.
 //
 // An explicit value always wins. It is matched case-insensitively and after
 // trimming surrounding space, so "HTML" and " text " are accepted. An
@@ -38,11 +49,11 @@ const eventBodyTypeParam = "body_type"
 //
 // Parameters:
 //   - content: the body text as supplied by the caller.
-//   - explicit: the caller's body_type argument, or "" when not supplied.
+//   - explicit: the caller's content_type argument, or "" when not supplied.
 //
 // Returns the content type to send to Graph, or an error naming the accepted
 // values. No side effects.
-func eventBodyType(content, explicit string) (models.BodyType, error) {
+func eventContentType(content, explicit string) (models.BodyType, error) {
 	switch strings.ToLower(strings.TrimSpace(explicit)) {
 	case "text":
 		return models.TEXT_BODYTYPE, nil
@@ -56,20 +67,20 @@ func eventBodyType(content, explicit string) (models.BodyType, error) {
 	default:
 		return models.TEXT_BODYTYPE, fmt.Errorf(
 			"invalid %s %q: expected \"text\" or \"html\". Omit it to infer the type from the body content",
-			eventBodyTypeParam, explicit)
+			eventContentTypeParam, explicit)
 	}
 }
 
 // newEventBody builds the Graph ItemBody for an event, choosing the content
-// type with eventBodyType.
+// type with eventContentType.
 //
 // Parameters:
 //   - content: the body text as supplied by the caller.
-//   - explicit: the caller's body_type argument, or "" when not supplied.
+//   - explicit: the caller's content_type argument, or "" when not supplied.
 //
 // Returns the populated ItemBody, or an error when explicit is unrecognised.
 func newEventBody(content, explicit string) (models.ItemBodyable, error) {
-	contentType, err := eventBodyType(content, explicit)
+	contentType, err := eventContentType(content, explicit)
 	if err != nil {
 		return nil, err
 	}

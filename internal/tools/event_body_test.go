@@ -14,15 +14,15 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
 
-// TestEventBodyType covers the contract for choosing an event body's content
-// type. Before body_type existed, the only rule was strings.Contains(body, "<"),
+// TestEventContentType covers the contract for choosing an event body's content
+// type. Before content_type existed, the only rule was strings.Contains(body, "<"),
 // which silently misclassified two ordinary cases in opposite directions:
 // escaped HTML with no literal "<" was sent as plain text, and prose containing
 // a comparison such as "a < b" was sent as HTML and rendered as broken markup.
 //
-// An explicit body_type must win over the heuristic, and an unrecognised value
+// An explicit content_type must win over the heuristic, and an unrecognised value
 // must be an error rather than a silent guess.
-func TestEventBodyType(t *testing.T) {
+func TestEventContentType(t *testing.T) {
 	tests := []struct {
 		name     string
 		content  string
@@ -54,18 +54,18 @@ func TestEventBodyType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := eventBodyType(tt.content, tt.explicit)
+			got, err := eventContentType(tt.content, tt.explicit)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("eventBodyType(%q, %q) = %v, want an error", tt.content, tt.explicit, got)
+					t.Fatalf("eventContentType(%q, %q) = %v, want an error", tt.content, tt.explicit, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("eventBodyType(%q, %q) returned unexpected error: %v", tt.content, tt.explicit, err)
+				t.Fatalf("eventContentType(%q, %q) returned unexpected error: %v", tt.content, tt.explicit, err)
 			}
 			if got != tt.want {
-				t.Errorf("eventBodyType(%q, %q) = %v, want %v", tt.content, tt.explicit, got, tt.want)
+				t.Errorf("eventContentType(%q, %q) = %v, want %v", tt.content, tt.explicit, got, tt.want)
 			}
 		})
 	}
@@ -99,14 +99,14 @@ func createEventPOSTBody(t *testing.T, args map[string]any) (string, *mcp.CallTo
 	return string(captured), result, requests
 }
 
-// TestCreateEvent_BodyTypeReachesGraph is the end-to-end half of the body_type
+// TestCreateEvent_ContentTypeReachesGraph is the end-to-end half of the content_type
 // contract: the chosen content type must appear in the JSON sent to Graph.
 //
 // It replaces TestBodyContentTypeDetection, which re-implemented
 // strings.Contains(body, "<") inside the test and asserted on its own copy, so
 // it passed no matter what the handler did -- and recorded the "x < y" case as
-// HTML, the very misclassification body_type exists to let callers avoid.
-func TestCreateEvent_BodyTypeReachesGraph(t *testing.T) {
+// HTML, the very misclassification content_type exists to let callers avoid.
+func TestCreateEvent_ContentTypeReachesGraph(t *testing.T) {
 	tests := []struct {
 		name     string
 		body     string
@@ -124,7 +124,7 @@ func TestCreateEvent_BodyTypeReachesGraph(t *testing.T) {
 			args := createEventBaseArgs()
 			args["body"] = tt.body
 			if tt.bodyType != "" {
-				args["body_type"] = tt.bodyType
+				args["content_type"] = tt.bodyType
 			}
 
 			posted, result, requests := createEventPOSTBody(t, args)
@@ -141,33 +141,33 @@ func TestCreateEvent_BodyTypeReachesGraph(t *testing.T) {
 	}
 }
 
-// TestCreateEvent_InvalidBodyTypeIsRejected checks that a body_type the Graph
+// TestCreateEvent_InvalidContentTypeIsRejected checks that a content_type the Graph
 // API has no notion of fails the call instead of falling back to a guess, and
 // that nothing is sent to Graph.
-func TestCreateEvent_InvalidBodyTypeIsRejected(t *testing.T) {
+func TestCreateEvent_InvalidContentTypeIsRejected(t *testing.T) {
 	args := createEventBaseArgs()
 	args["body"] = "Agenda"
-	args["body_type"] = "markdown"
+	args["content_type"] = "markdown"
 
 	_, result, requests := createEventPOSTBody(t, args)
 
 	if !result.IsError {
-		t.Fatal("expected an error result for body_type=markdown")
+		t.Fatal("expected an error result for content_type=markdown")
 	}
 	if requests != 0 {
 		t.Errorf("issued %d Graph requests, want 0: the event must not be created", requests)
 	}
 	msg := result.Content[0].(mcp.TextContent).Text
-	for _, want := range []string{"body_type", "markdown", `"text"`, `"html"`} {
+	for _, want := range []string{"content_type", "markdown", `"text"`, `"html"`} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error message missing %s: %q", want, msg)
 		}
 	}
 }
 
-// TestUpdateEvent_BodyTypeReachesGraph is the same contract on the update path,
-// which shares eventBodyType through newEventBody.
-func TestUpdateEvent_BodyTypeReachesGraph(t *testing.T) {
+// TestUpdateEvent_ContentTypeReachesGraph is the same contract on the update path,
+// which shares eventContentType through newEventBody.
+func TestUpdateEvent_ContentTypeReachesGraph(t *testing.T) {
 	tests := []struct {
 		name     string
 		body     string
@@ -193,7 +193,7 @@ func TestUpdateEvent_BodyTypeReachesGraph(t *testing.T) {
 			handler := HandleUpdateEvent(graph.RetryConfig{}, 30*time.Second, "America/New_York")
 			args := map[string]any{"event_id": "AAMkAGTest123", "body": tt.body}
 			if tt.bodyType != "" {
-				args["body_type"] = tt.bodyType
+				args["content_type"] = tt.bodyType
 			}
 			req := mcp.CallToolRequest{}
 			req.Params.Arguments = args
@@ -209,5 +209,45 @@ func TestUpdateEvent_BodyTypeReachesGraph(t *testing.T) {
 				t.Errorf("PATCH body missing %s\ngot: %s", tt.want, posted)
 			}
 		})
+	}
+}
+
+// TestUpdateEvent_InvalidContentTypeIsRejected mirrors the create-path test on
+// the update handler. Both build the whole event in memory and issue a single
+// Graph call at the end, so an invalid content_type must abort before that call
+// and leave the event untouched -- including the other fields already applied.
+func TestUpdateEvent_InvalidContentTypeIsRejected(t *testing.T) {
+	requests := 0
+	client, srv := newTestGraphClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(mockEventJSON)) //nolint:errcheck // test helper
+	}))
+	defer srv.Close()
+
+	handler := HandleUpdateEvent(graph.RetryConfig{}, 30*time.Second, "America/New_York")
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"event_id":     "AAMkAGTest123",
+		"subject":      "Renamed",
+		"body":         "Agenda",
+		"content_type": "markdown",
+	}
+
+	result, err := handler(auth.WithGraphClient(context.Background(), client), req)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result for content_type=markdown")
+	}
+	if requests != 0 {
+		t.Errorf("issued %d Graph requests, want 0: the subject change must not be sent either", requests)
+	}
+	msg := result.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"content_type", "markdown", `"text"`, `"html"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %s: %q", want, msg)
+		}
 	}
 }

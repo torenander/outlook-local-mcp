@@ -229,10 +229,10 @@ func HandleUpdateEvent(retryCfg graph.RetryConfig, timeout time.Duration, defaul
 			event.SetEnd(end)
 		}
 
-		// Optional: body. An explicit body_type wins; otherwise the content
+		// Optional: body. An explicit content_type wins; otherwise the content
 		// type is inferred from the body text. See event_body.go.
 		if bodyStr, ok := args["body"].(string); ok {
-			bodyTypeStr, _ := args[eventBodyTypeParam].(string)
+			bodyTypeStr, _ := args[eventContentTypeParam].(string)
 			body, bodyErr := newEventBody(bodyStr, bodyTypeStr)
 			if bodyErr != nil {
 				return mcp.NewToolResultError(bodyErr.Error()), nil

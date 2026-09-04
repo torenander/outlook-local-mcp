@@ -262,7 +262,7 @@ b13ca5f revert(auth): keep device_code as the inferred default (CR-0067 A2)
 
 39 files, +3196/-522. The A2 trial and its reversal are deliberately preserved as separate commits rather than squashed, so a future reader can see that `auth_code` was attempted and why it was abandoned.
 
-New files (8 production, 4 test):
+New files (10 production, 4 test):
 
 | File | Purpose |
 |---|---|
@@ -274,15 +274,17 @@ New files (8 production, 4 test):
 | `internal/auth/devicecode_prompt.go` | `DeviceCodePrompt`, `SignInURL` |
 | `internal/auth/devicecode_present.go` | URL-mode presentation, ack→wait→retry, verbatim fallback |
 | `internal/tools/complete_auth_guidance.go` | `completeAuthUnavailable` |
+| `internal/auth/browser_flow.go` | `handleBrowserAuth`, split out for NFR-27 |
+| `internal/auth/devicecode_flow.go` | `handleDeviceCodeAuth`, split out for NFR-27 |
 
 `CHANGELOG.md` not edited, per CLAUDE.md. All changed files map to a CR-0067 Affected Component, the Test Strategy, or the documentation set. One out-of-scope one-line fix is included and called out below.
 
 ## Gaps
 
-1. ~~**NFR-27 is only half met — `middleware.go` grew.**~~ **Resolved.** At validation time seven cohesive pieces had been split out and `presentDeviceCode` (~40 lines) moved, but the entry-point restructure, the silent-refresh call sites, the in-flight bracketing and their doc comments added more than came out: 804 → 833 lines, +29 net. Reporting that as PASS would have been false, so the mechanical remedy was deferred. It has since been applied: `handleBrowserAuth` and `handleDeviceCodeAuth` now live in `browser_flow.go` and `devicecode_flow.go`, leaving `middleware.go` at **637 lines, 167 below its original size**. The move was verified to be pure — all 178 lines that left `middleware.go` reappear in the new files and none were added — with the full gate, `go test -race ./...` and `golangci-lint` (0 issues) re-run after it.
-2. **A5 guidance is unit-tested only.** The wording is asserted, but no live session has confirmed that an LLM handed the new guidance actually recovers. Cheap to check during the next real re-auth.
-3. **A6 is unit-tested only.** Verifying that re-auth targets the correct account requires a **second** Microsoft account. The unit test asserts the account credential is used and the closure credential is not, which is the whole mechanism, but the wiring has never run live.
-4. **URL-mode elicitation `Accept` path is unit-tested only.** No client is known to answer URL-mode elicitation with `Accept`. If none does in practice, A7's ack→wait→retry branch is dead code in the field and the plain-text fallback is the entire user experience — which is why FR-22 specifies that fallback as the primary surface rather than a degraded one.
+**Resolved since validation — NFR-27.** At validation time seven cohesive pieces had been split out and `presentDeviceCode` (~40 lines) moved, but the entry-point restructure, the silent-refresh call sites, the in-flight bracketing and their doc comments added more than came out: 804 → 833 lines, +29 net. Reporting that as PASS would have been false, so the mechanical remedy was deferred. It has since been applied: `handleBrowserAuth` and `handleDeviceCodeAuth` now live in `browser_flow.go` and `devicecode_flow.go`, leaving `middleware.go` at **637 lines, 167 below its original size**. The move was verified to be pure — all 178 lines that left `middleware.go` reappear in the new files and none were added — with the full gate, `go test -race ./...` and `golangci-lint` (0 issues) re-run after it.
+1. **A5 guidance is unit-tested only.** The wording is asserted, but no live session has confirmed that an LLM handed the new guidance actually recovers. Cheap to check during the next real re-auth.
+2. **A6 is unit-tested only.** Verifying that re-auth targets the correct account requires a **second** Microsoft account. The unit test asserts the account credential is used and the closure credential is not, which is the whole mechanism, but the wiring has never run live.
+3. **URL-mode elicitation `Accept` path is unit-tested only.** No client is known to answer URL-mode elicitation with `Accept`. If none does in practice, A7's ack→wait→retry branch is dead code in the field and the plain-text fallback is the entire user experience — which is why FR-22 specifies that fallback as the primary surface rather than a degraded one.
 
 ## Notes
 

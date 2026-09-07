@@ -426,45 +426,6 @@ func TestFormatMessageDetailText_NormalImportance(t *testing.T) {
 	}
 }
 
-// TestFormatMailFoldersText verifies that folders are formatted as a numbered
-// list with unread and total counts, plus a total count.
-func TestFormatMailFoldersText(t *testing.T) {
-	folders := []map[string]any{
-		{"displayName": "Inbox", "unreadItemCount": int32(3), "totalItemCount": int32(142)},
-		{"displayName": "Sent Items", "unreadItemCount": int32(0), "totalItemCount": int32(89)},
-		{"displayName": "Drafts", "unreadItemCount": int32(0), "totalItemCount": int32(2)},
-	}
-
-	result := FormatMailFoldersText(folders)
-
-	if !strings.Contains(result, "1. Inbox (3 unread, 142 total)") {
-		t.Errorf("expected '1. Inbox (3 unread, 142 total)', got:\n%s", result)
-	}
-	if !strings.Contains(result, "2. Sent Items (0 unread, 89 total)") {
-		t.Error("expected '2. Sent Items (0 unread, 89 total)'")
-	}
-	if !strings.Contains(result, "3. Drafts (0 unread, 2 total)") {
-		t.Error("expected '3. Drafts (0 unread, 2 total)'")
-	}
-	if !strings.Contains(result, "3 folder(s) total.") {
-		t.Error("expected '3 folder(s) total.' in output")
-	}
-}
-
-// TestFormatMailFoldersText_Empty verifies that a nil folder list returns
-// "No folders found."
-func TestFormatMailFoldersText_Empty(t *testing.T) {
-	result := FormatMailFoldersText(nil)
-	if result != "No folders found." {
-		t.Errorf("result = %q, want %q", result, "No folders found.")
-	}
-
-	result = FormatMailFoldersText([]map[string]any{})
-	if result != "No folders found." {
-		t.Errorf("result = %q, want %q", result, "No folders found.")
-	}
-}
-
 // TestFormatAccountsText verifies that accounts with no UPN or auth_method
 // fall back to the label-and-state rendering and the total count is correct.
 func TestFormatAccountsText(t *testing.T) {
@@ -640,5 +601,221 @@ func TestFormatAccountLine_EmptyLabel(t *testing.T) {
 	result := FormatAccountLine("", "user@example.com")
 	if result != "" {
 		t.Errorf("FormatAccountLine with empty label = %q, want empty string", result)
+	}
+}
+
+// TestFormatFolderTreeText_Empty verifies that an empty listing reports no
+// folders, and names the parent folder when one was requested.
+func TestFormatFolderTreeText_Empty(t *testing.T) {
+	if got := FormatFolderTreeText(FolderListing{}); got != "No folders found." {
+		t.Errorf("FormatFolderTreeText(empty) = %q, want %q", got, "No folders found.")
+	}
+
+	got := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{}, Root: "Inbox/01 Projects"})
+	want := `No subfolders found under "Inbox/01 Projects".`
+	if got != want {
+		t.Errorf("FormatFolderTreeText(empty under root) = %q, want %q", got, want)
+	}
+}
+
+// TestFormatFolderTreeText_Flat verifies the markdown rendering of a single
+// level: one list item per folder, the word "unread" only when the unread
+// count is non-zero, and a footer offering a worked `folder` value.
+func TestFormatFolderTreeText_Flat(t *testing.T) {
+	listing := FolderListing{Nodes: []FolderNode{
+		{Name: "Inbox", Path: "Inbox", Unread: 3, Total: 42},
+		{Name: "Sent Items", Path: "Sent Items", Unread: 0, Total: 100},
+	}}
+
+	result := FormatFolderTreeText(listing)
+
+	if !strings.Contains(result, "- Inbox — 3 unread / 42\n") {
+		t.Errorf("expected Inbox list item, got:\n%s", result)
+	}
+	if !strings.Contains(result, "- Sent Items — 0 / 100\n") {
+		t.Errorf("expected Sent Items list item without the word 'unread', got:\n%s", result)
+	}
+	if strings.Contains(result, "Sent Items — 0 unread") {
+		t.Errorf("the word 'unread' must be omitted for a zero count, got:\n%s", result)
+	}
+	if !strings.Contains(result, "2 folders. Target one with folder=") {
+		t.Errorf("expected footer with folder hint, got:\n%s", result)
+	}
+}
+
+// TestFormatFolderTreeText_Nested verifies two-space-per-level indentation,
+// that paths (not Graph IDs) are what the footer hands back to the caller, and
+// that the recursive folder count includes descendants.
+func TestFormatFolderTreeText_Nested(t *testing.T) {
+	listing := FolderListing{Nodes: []FolderNode{
+		{
+			Name: "Inbox", Path: "Inbox", Unread: 12, Total: 340, SubfolderCount: 1, Expanded: true,
+			Children: []FolderNode{
+				{
+					Name: "01 Projects", Path: "Inbox/01 Projects", Unread: 0, Total: 58, SubfolderCount: 1, Expanded: true,
+					Children: []FolderNode{
+						{Name: "Swedfund", Path: "Inbox/01 Projects/Swedfund", Unread: 0, Total: 8},
+					},
+				},
+			},
+		},
+		{Name: "Archive", Path: "Archive", Unread: 0, Total: 1204},
+	}}
+
+	result := FormatFolderTreeText(listing)
+
+	for _, want := range []string{
+		"- Inbox — 12 unread / 340\n",
+		"  - 01 Projects — 0 / 58\n",
+		"    - Swedfund — 0 / 8\n",
+		"- Archive — 0 / 1204\n",
+		`4 folders. Target one with folder="Inbox/01 Projects/Swedfund".`,
+	} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, result)
+		}
+	}
+
+	// The default tier must not leak Graph IDs — that is what makes it cheap.
+	if strings.Contains(result, "AAMkAG") {
+		t.Errorf("text output must not contain Graph IDs, got:\n%s", result)
+	}
+}
+
+// TestFormatFolderTreeText_UnnamedFolder verifies that folders with an empty
+// display name fall back to "(Unnamed)" rather than rendering a blank item.
+func TestFormatFolderTreeText_UnnamedFolder(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{{Name: "", Path: ""}}})
+
+	if !strings.Contains(result, "(Unnamed)") {
+		t.Errorf("expected (Unnamed) fallback, got: %q", result)
+	}
+}
+
+// TestFormatFolderTreeText_SubfolderHint verifies that a non-recursive listing
+// tells the caller which folders have subfolders it did not fetch, and that
+// the suggested fix matches how the listing was requested.
+func TestFormatFolderTreeText_SubfolderHint(t *testing.T) {
+	node := FolderNode{Name: "Inbox", Path: "Inbox", Total: 10, SubfolderCount: 4}
+
+	flat := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{node}})
+	if !strings.Contains(flat, "[+4 subfolders — use recursive=true]") {
+		t.Errorf("a non-recursive listing should suggest recursive=true, got:\n%s", flat)
+	}
+
+	// Same unexpanded node, but the caller already asked to recurse — so the
+	// only remaining lever is depth, and suggesting recursive=true would be
+	// advice they have already followed.
+	deep := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{node}, Recursive: true})
+	if !strings.Contains(deep, "[+4 subfolders — increase max_depth]") {
+		t.Errorf("a recursive listing should suggest increase max_depth, got:\n%s", deep)
+	}
+	if strings.Contains(deep, "recursive=true") {
+		t.Errorf("must not tell a recursive caller to pass recursive=true, got:\n%s", deep)
+	}
+}
+
+// TestFormatFolderTreeText_HiddenSubfoldersNotActionable is the regression test
+// for the state conflation found by live testing against a real Microsoft 365
+// mailbox.
+//
+// "Conversation History" reports childFolderCount=1 (the Teams "Team Chat"
+// folder) but returns nothing from GET /childFolders. The node was expanded,
+// so the caller has already done everything they can; the old formatter told
+// them to "use recursive=true" — advice that produces an empty result and
+// invites an LLM to retry forever.
+func TestFormatFolderTreeText_HiddenSubfoldersNotActionable(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{
+		Recursive: true,
+		Nodes: []FolderNode{{
+			Name: "Conversation History", Path: "Conversation History",
+			SubfolderCount: 1, Expanded: true,
+		}},
+	})
+
+	if !strings.Contains(result, "[1 subfolder hidden]") {
+		t.Errorf("expected a hidden-subfolder annotation, got:\n%s", result)
+	}
+	for _, forbidden := range []string{"recursive=true", "max_depth", "max_results"} {
+		if strings.Contains(result, forbidden) {
+			t.Errorf("must not suggest %q for a subfolder Graph withheld, got:\n%s", forbidden, result)
+		}
+	}
+}
+
+// TestFormatFolderTreeText_HiddenSubfoldersPartial verifies the same
+// disambiguation when Graph returns some but not all of the children it
+// counted — the milder form of the same trap.
+func TestFormatFolderTreeText_HiddenSubfoldersPartial(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{
+		Recursive: true,
+		Nodes: []FolderNode{{
+			Name: "Inbox", Path: "Inbox", SubfolderCount: 3, Expanded: true,
+			Children: []FolderNode{{Name: "Clients", Path: "Inbox/Clients"}},
+		}},
+	})
+
+	if !strings.Contains(result, "[2 subfolders hidden]") {
+		t.Errorf("expected the two withheld subfolders to be reported, got:\n%s", result)
+	}
+}
+
+// TestFormatFolderTreeText_ExpandedNoHint verifies that a fully expanded node
+// carries no annotation at all, so the common case stays cheap.
+func TestFormatFolderTreeText_ExpandedNoHint(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{
+		Recursive: true,
+		Nodes: []FolderNode{{
+			Name: "Inbox", Path: "Inbox", SubfolderCount: 1, Expanded: true,
+			Children: []FolderNode{{Name: "Clients", Path: "Inbox/Clients"}},
+		}},
+	})
+
+	if strings.Contains(result, "[") {
+		t.Errorf("a fully expanded node needs no annotation, got:\n%s", result)
+	}
+}
+
+// TestFormatFolderTreeText_ErrorSubtreeVisible verifies that a subtree which
+// failed to load is surfaced in text output. Under the previous formatter the
+// "_error" marker was rendered nowhere, so partial results looked complete.
+func TestFormatFolderTreeText_ErrorSubtreeVisible(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{
+		{Name: "Inbox", Path: "Inbox", Total: 10, SubfolderCount: 2, Err: "could not load subfolders: throttled"},
+	}})
+
+	if !strings.Contains(result, "[subfolders unavailable: could not load subfolders: throttled]") {
+		t.Errorf("expected failed subtree to be visible, got:\n%s", result)
+	}
+}
+
+// TestFormatFolderTreeText_TruncationVisible verifies that both root-level and
+// per-folder truncation are reported, so a capped listing is never mistaken
+// for a complete one.
+func TestFormatFolderTreeText_TruncationVisible(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{
+		Nodes: []FolderNode{
+			{Name: "Inbox", Path: "Inbox", Total: 10, SubfolderCount: 500, Truncated: true},
+		},
+		Truncated: true,
+	})
+
+	if !strings.Contains(result, "[more subfolders not shown — raise max_results]") {
+		t.Errorf("expected per-folder truncation marker, got:\n%s", result)
+	}
+	if !strings.Contains(result, "More folders exist than were returned") {
+		t.Errorf("expected root-level truncation notice, got:\n%s", result)
+	}
+}
+
+// TestFormatFolderTreeText_Singular verifies the footer uses the singular noun
+// for a one-folder listing.
+func TestFormatFolderTreeText_Singular(t *testing.T) {
+	result := FormatFolderTreeText(FolderListing{Nodes: []FolderNode{
+		{Name: "Archive", Path: "Archive", Total: 3},
+	}})
+
+	if !strings.Contains(result, `1 folder. Target one with folder="Archive".`) {
+		t.Errorf("expected singular footer, got:\n%s", result)
 	}
 }

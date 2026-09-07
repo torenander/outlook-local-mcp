@@ -217,17 +217,61 @@ func TestTopLevelDescription_Mail_ManageEnabled(t *testing.T) {
 	})
 	desc := getToolDescription(t, s, "mail")
 
-	draftVerbs := []string{
+	manageVerbs := []string{
 		"create_draft",
 		"create_reply_draft",
 		"create_forward_draft",
 		"update_draft",
 		"delete_draft",
+		"create_folder",
+		"delete_folder",
+		"move_message",
+		"move_messages",
 	}
-	for _, verb := range draftVerbs {
+	for _, verb := range manageVerbs {
 		if !strings.Contains(desc, verb) {
-			t.Errorf("mail description (MailManageEnabled=true) missing draft verb %q\n  got: %s", verb, desc)
+			t.Errorf("mail description (MailManageEnabled=true) missing manage verb %q\n  got: %s", verb, desc)
 		}
+	}
+
+	// The merged folder-browsing verb replaced two separate ones (CR-0066
+	// amended B1); neither old name may reappear in the description.
+	for _, merged := range []string{"list_child_folders", "list_folder_tree"} {
+		if strings.Contains(desc, merged) {
+			t.Errorf("mail description still advertises merged verb %q\n  got: %s", merged, desc)
+		}
+	}
+}
+
+// TestTopLevelDescription_Mail_ManageDisabled verifies that MailManageEnabled-
+// gated verbs do NOT appear when MailManageEnabled=false (CR-0066 AC-9).
+func TestTopLevelDescription_Mail_ManageDisabled(t *testing.T) {
+	s := buildDescriptionTestServer(t, config.Config{
+		AuthRecordPath: "/tmp/test",
+		CacheName:      "test",
+		AuthMethod:     "browser",
+		MailEnabled:    true,
+	})
+	desc := getToolDescription(t, s, "mail")
+
+	manageVerbs := []string{
+		"create_draft",
+		"delete_draft",
+		"create_folder",
+		"delete_folder",
+		"move_message",
+		"move_messages",
+	}
+	for _, verb := range manageVerbs {
+		if strings.Contains(desc, verb) {
+			t.Errorf("mail description (MailManageEnabled=false) should not contain verb %q\n  got: %s", verb, desc)
+		}
+	}
+
+	// Folder browsing is a read covered by Mail.Read, so it stays advertised
+	// even with mail management disabled (CR-0066 amended B4).
+	if !strings.Contains(desc, "list_folders") {
+		t.Errorf("mail description (MailManageEnabled=false) must still advertise list_folders\n  got: %s", desc)
 	}
 }
 

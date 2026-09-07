@@ -59,7 +59,7 @@ For `device_code` auth without elicitation, `account.add` uses a two-call patter
 
 ## Read-only mode
 
-Set `OUTLOOK_MCP_READ_ONLY=true` to disable all write operations. All write verbs (`calendar.create_event`, `calendar.create_meeting`, `calendar.update_event`, `calendar.update_meeting`, `calendar.delete_event`, `calendar.cancel_meeting`, `calendar.respond_event`, `calendar.reschedule_event`, `calendar.reschedule_meeting`, `mail.create_draft`, `mail.create_reply_draft`, `mail.create_forward_draft`, `mail.update_draft`, `mail.delete_draft`) return an error when invoked. Read and search verbs remain fully functional.
+Set `OUTLOOK_MCP_READ_ONLY=true` to disable all write operations. All write verbs (`calendar.create_event`, `calendar.create_meeting`, `calendar.update_event`, `calendar.update_meeting`, `calendar.delete_event`, `calendar.cancel_meeting`, `calendar.respond_event`, `calendar.reschedule_event`, `calendar.reschedule_meeting`, `mail.create_draft`, `mail.create_reply_draft`, `mail.create_forward_draft`, `mail.update_draft`, `mail.delete_draft`, `mail.create_folder`, `mail.delete_folder`, `mail.move_message`, `mail.move_messages`) return an error when invoked. Read and search verbs remain fully functional, including `mail.list_folders`.
 
 ```bash
 OUTLOOK_MCP_READ_ONLY=true ./outlook-local-mcp
@@ -72,8 +72,10 @@ Mail access is disabled by default and enabled in two tiers via environment vari
 | Variable | Value | Effect |
 |---|---|---|
 | `MAIL_ENABLED` | `false` (default) | Mail verbs unavailable; no mail OAuth scope requested |
-| `MAIL_ENABLED` | `true` | Enables read-only mail verbs (`mail.list_folders`, `mail.list_messages`, `mail.search_messages`, `mail.get_message`, `mail.get_attachment`); requests `Mail.Read` scope |
-| `MAIL_MANAGE_ENABLED` | `true` | Enables all mail verbs including draft management (implies `MAIL_ENABLED`); requests `Mail.ReadWrite` scope |
+| `MAIL_ENABLED` | `true` | Enables read-only mail verbs (`mail.list_folders` — browses the whole folder hierarchy, including nested subfolders — plus `mail.list_messages`, `mail.search_messages`, `mail.get_message`, `mail.get_conversation`, `mail.list_attachments`, `mail.get_attachment`); requests `Mail.Read` scope |
+| `MAIL_MANAGE_ENABLED` | `true` | Enables all mail verbs including draft management (`mail.create_draft`, `mail.create_reply_draft`, `mail.create_forward_draft`, `mail.update_draft`, `mail.delete_draft`), folder management (`mail.create_folder`, `mail.delete_folder`) and message filing (`mail.move_message`, `mail.move_messages`) (implies `MAIL_ENABLED`); requests `Mail.ReadWrite` scope |
+
+Browsing folders is a read, so `mail.list_folders` needs only `MAIL_ENABLED`. Creating, deleting, and filing into folders are writes and need `MAIL_MANAGE_ENABLED`.
 
 `Mail.Send` is **never** requested under any configuration. The model prepares drafts that land in Outlook Drafts for manual review; email is never sent automatically. Enabling mail read for the first time triggers an incremental consent prompt; upgrading to mail manage triggers re-consent.
 

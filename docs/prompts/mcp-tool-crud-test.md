@@ -544,7 +544,7 @@ If `config.features.mail_enabled` from Step 0c is `false`, **skip** Steps 30 thr
 - **Verify:** The response is plain text listing at minimum `help`, `list_folders`, `list_messages`, `get_message`, `search_messages`.
 - **Purpose:** Exercises the help verb for the mail domain (AC-2 / FR-15).
 
-Call `{tool: "mail", args: {operation: "list_messages", ...}}` four times with the following filter combinations and record whether each call returns plain text, a sensible total count, and the expected filtering behavior:
+Call `{tool: "mail", args: {operation: "list_messages", ...}}` five times with the following filter combinations and record whether each call returns plain text, a sensible total count, and the expected filtering behavior:
 
 | Call | Parameters                                                | Expected                                                         |
 |------|-----------------------------------------------------------|------------------------------------------------------------------|
@@ -552,8 +552,11 @@ Call `{tool: "mail", args: {operation: "list_messages", ...}}` four times with t
 | 30c  | `folder: "Inbox", flag_status: "flagged"`                 | Only flagged messages are listed                                |
 | 30d  | `folder: "Inbox", provenance: "created_by_mcp"`           | Only MCP-tagged messages (may be empty if none created yet)     |
 | 30e  | `folder: "Inbox"` (no filters, baseline)                  | Baseline message count recorded for comparison                  |
+| 30f  | `folder_id: "Inbox"` (legacy alias, no filters)           | Same count as 30e; `folder_id` is an accepted alias for `folder` |
 
 - **Verify:** All calls return plain text. The filtered counts are less than or equal to the baseline.
+- **Verify:** 30f returns the same count as 30e. If 30f returns a *larger* count, the folder scope was ignored and the query widened to the whole mailbox.
+- **Verify:** `folder` accepts a folder name, not just a Graph ID. If the 30e count equals the unscoped total across all folders, the scope was ignored.
 - **Fail:** If any call returns an error or ignores the filter.
 
 ### Step 31 -- Create draft (skip if mail management disabled)
@@ -595,7 +598,7 @@ Then call `{tool: "mail", args: {operation: "delete_draft", message_id: "<draft 
 
 ### Step 35 -- Get conversation
 
-Call `{tool: "mail", args: {operation: "list_messages", folder: "Inbox", top: 1}}` and record the first message's `conversationId` as **conversation ID**. If Inbox is empty, skip Step 35.
+Call `{tool: "mail", args: {operation: "list_messages", folder: "Inbox", max_results: 1}}` and record the first message's `conversationId` as **conversation ID**. If Inbox is empty, skip Step 35.
 
 Call `{tool: "mail", args: {operation: "get_conversation", id: "<conversation ID>"}}`.
 
@@ -604,7 +607,7 @@ Call `{tool: "mail", args: {operation: "get_conversation", id: "<conversation ID
 
 ### Step 36 -- Get attachment
 
-Using `{tool: "mail", args: {operation: "list_messages", folder: "Inbox", has_attachments: true, top: 1}}` pick a message that has attachments. If none found, skip Step 36.
+Using `{tool: "mail", args: {operation: "list_messages", folder: "Inbox", has_attachments: true, max_results: 1}}` pick a message that has attachments. If none found, skip Step 36.
 
 Call `{tool: "mail", args: {operation: "get_message", id: "<message ID>", output: "summary"}}` to enumerate its attachment IDs. Then call:
 
@@ -613,6 +616,103 @@ Call `{tool: "mail", args: {operation: "get_message", id: "<message ID>", output
 - **Verify:** Response is plain text with attachment metadata (name, size, content type).
 - **Verify:** If the attachment is within the configured size limit, content is returned (base64); otherwise an explanatory message is returned.
 - **Fail:** If the attachment cannot be retrieved for a valid ID.
+
+### Step 37 -- Create top-level folder (skip if mail management disabled)
+
+**Gating for Steps 37-44.** These steps cover folder management and message
+filing (CR-0066).
+
+- If `config.features.mail_enabled` from Step 0c is `false`, **skip Steps 37-44** and record them as SKIP.
+- If `config.features.mail_manage_enabled` from Step 0c is `false`, **skip Steps 37-38 and 41-44** (all writes) and record them as SKIP, but still run **Steps 39-40** against whatever folders already exist: `list_folders` is a read verb available with `MAIL_ENABLED` alone. When running Steps 39-40 in this mode, substitute any real folder that has at least one subfolder for "MCP-Test-Folder", and note the substitution in the Comment column.
+
+Steps 37-44 run in order and each depends on the one before it. There is no
+setup outside this block beyond Step 0c's config capture.
+
+Call `{tool: "mail", args: {operation: "create_folder", display_name: "MCP-Test-Folder"}}`.
+
+- **Verify:** Response is plain text containing the new folder ID and display name "MCP-Test-Folder".
+- **Record** the returned folder ID as **test folder ID**.
+- **Fail:** If the folder was not created or no ID is returned.
+
+### Step 38 -- Create nested child folder addressed by name
+
+Call `{tool: "mail", args: {operation: "create_folder", display_name: "MCP-Test-Subfolder", parent: "MCP-Test-Folder"}}`.
+
+Note the `parent` is the folder **name**, not an ID — this exercises natural-language folder addressing.
+
+- **Verify:** Response is plain text containing the new child folder ID, display name, and the parent reference.
+- **Record** the returned folder ID as **test subfolder ID**.
+- **Fail:** If the folder was not created or the parent reference is missing.
+
+### Step 39 -- Browse folders, default single level
+
+Call `{tool: "mail", args: {operation: "list_folders"}}`.
+
+- **Verify:** Response is a markdown list, one `- Name — <unread> / <total>` line per top-level folder.
+- **Verify:** "MCP-Test-Folder" appears and is annotated `[+1 subfolders — use recursive=true]`.
+- **Verify:** "MCP-Test-Subfolder" does **not** appear (the default is one level only).
+- **Verify:** No Graph folder IDs appear in the output. A real ID is ~120 characters of base64 beginning `AAMk`, `AQMk`, or similar — the text tier must show folder *paths* only.
+- **Verify:** The final line reports a folder count and offers a `folder="..."` example.
+- **Fail:** If the output is JSON, contains folder IDs, or descends without being asked.
+
+### Step 40 -- Browse recursively and by path
+
+Call `{tool: "mail", args: {operation: "list_folders", recursive: true, max_depth: 2}}`.
+
+- **Verify:** "MCP-Test-Folder" appears at the left margin and "MCP-Test-Subfolder" appears indented two spaces beneath it.
+
+Call `{tool: "mail", args: {operation: "list_folders", recursive: true, max_depth: 1}}`.
+
+- **Verify:** "MCP-Test-Subfolder" does **not** appear. `max_depth=1` means exactly one level.
+
+Call `{tool: "mail", args: {operation: "list_folders", folder: "MCP-Test-Folder"}}`.
+
+- **Verify:** Response lists "MCP-Test-Subfolder" and no top-level siblings.
+- **Verify:** The path shown for the subfolder is "MCP-Test-Folder/MCP-Test-Subfolder".
+
+Call `{tool: "mail", args: {operation: "list_folders", folder: "MCP-Test-Folder", output: "summary"}}` and then the same call with `output: "raw"`.
+
+- **Verify:** `summary` is JSON using the keys `name`, `unread`, `total`, `subfolder_count`, `path`, `id`.
+- **Verify:** `raw` is JSON using the Graph keys `displayName`, `unreadItemCount`, `totalItemCount`, `childFolderCount`, `id` under a `value` array.
+- **Verify:** The two payloads are **not** identical.
+
+Call `{tool: "mail", args: {operation: "list_folders", folder: "MCP-Test-Folder/Nope"}}`.
+
+- **Verify:** An error naming the unmatched segment "Nope" and listing the folders that were available at that level.
+- **Fail:** If any of the above verifications fails, or if `list_child_folders` / `list_folder_tree` still exist as operations.
+
+### Step 41 -- Move message into the test folder by name
+
+Using `{tool: "mail", args: {operation: "list_messages", max_results: 1}}`, pick a message and record its ID as **move test message ID**. If no messages exist, skip Steps 41-42.
+
+Call `{tool: "mail", args: {operation: "move_message", message_id: "<move test message ID>", destination: "MCP-Test-Folder"}}`.
+
+- **Verify:** Response is plain text containing the original message ID, a new message ID, and the destination folder reference.
+- **Record** the new message ID as **moved message ID**.
+- **Fail:** If the move fails or no new ID is returned.
+
+### Step 42 -- Batch move messages back to a well-known folder
+
+Call `{tool: "mail", args: {operation: "move_messages", message_ids: "<moved message ID>", destination: "Inbox"}}`.
+
+- **Verify:** Response reports "Moved 1 of 1 message(s)" with per-message OK status.
+- **Verify:** The well-known name "Inbox" was accepted as a destination without an ID lookup by the caller.
+- **Fail:** If the batch move reports failure.
+
+### Step 43 -- Delete subfolder addressed by path
+
+Call `{tool: "mail", args: {operation: "delete_folder", folder: "MCP-Test-Folder/MCP-Test-Subfolder"}}`.
+
+- **Verify:** Response is plain text confirming the folder was deleted.
+- **Fail:** If the deletion fails.
+
+### Step 44 -- Delete top-level test folder
+
+Call `{tool: "mail", args: {operation: "delete_folder", folder: "MCP-Test-Folder"}}`.
+
+- **Verify:** Response is plain text confirming the folder was deleted.
+- **Verify:** A subsequent `{tool: "mail", args: {operation: "list_folders", folder: "MCP-Test-Folder"}}` returns an error naming "MCP-Test-Folder" as unmatched at the top level.
+- **Fail:** If the folder still exists after deletion.
 
 ## Reporting
 
@@ -673,12 +773,21 @@ After all steps, print a summary table. Every row **MUST** include a short `Comm
 | 30c  | Mail list flag_status filter      | PASS/FAIL/SKIP | e.g., "flagged filter honored"                           |
 | 30d  | Mail list provenance filter       | PASS/FAIL/SKIP | e.g., "provenance filter returned 0 MCP messages"        |
 | 30e  | Mail list baseline                | PASS/FAIL/SKIP | e.g., "baseline count recorded"                          |
+| 30f  | Mail list folder_id alias         | PASS/FAIL/SKIP | e.g., "alias count matches folder: baseline"             |
 | 31   | Create mail draft                 | PASS/FAIL/SKIP | e.g., "draft id returned"                                |
 | 32   | Update mail draft                 | PASS/FAIL/SKIP | e.g., "subject updated"                                  |
 | 33   | Create reply draft                | PASS/FAIL/SKIP | e.g., "reply draft created"                              |
 | 34   | Delete drafts                     | PASS/FAIL/SKIP | e.g., "both drafts deleted, 404 on re-fetch"             |
 | 35   | Get conversation                  | PASS/FAIL/SKIP | e.g., "thread returned in chronological order"           |
 | 36   | Get attachment                    | PASS/FAIL/SKIP | e.g., "metadata + base64 under size limit"               |
+| 37   | Create top-level folder           | PASS/FAIL/SKIP | e.g., "MCP-Test-Folder created with ID"                  |
+| 38   | Create nested folder by name      | PASS/FAIL/SKIP | e.g., "MCP-Test-Subfolder created via parent name"       |
+| 39   | Browse folders (default 1 level)  | PASS/FAIL/SKIP | e.g., "markdown tree, no IDs, subfolder hint shown"      |
+| 40   | Browse recursive / by path / tiers| PASS/FAIL/SKIP | e.g., "max_depth honoured, path addressing works, tiers differ" |
+| 41   | Move message by folder name       | PASS/FAIL/SKIP | e.g., "message moved, new ID returned"                   |
+| 42   | Batch move to well-known folder   | PASS/FAIL/SKIP | e.g., "1 of 1 moved back to Inbox"                       |
+| 43   | Delete subfolder by path          | PASS/FAIL/SKIP | e.g., "subfolder deleted via path"                       |
+| 44   | Delete top-level test folder      | PASS/FAIL/SKIP | e.g., "folder deleted, 404 on re-fetch"                  |
 ```
 
 Then print the **environment** section using all values recorded in Steps 0c and 1:

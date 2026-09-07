@@ -575,36 +575,160 @@ func FormatAttachmentsText(atts []map[string]any) string {
 	return b.String()
 }
 
-// FormatMailFoldersText formats a slice of serialized mail folder maps into a
-// numbered plain-text listing with unread and total item counts.
+// FormatFolderTreeText renders a folder listing as an indented markdown tree.
+// It is the default (`text`) output tier for the list_folders verb.
+//
+// Folders are addressed by natural-language path rather than by Graph id: the
+// 150-character ids are what made the previous listing expensive, and the
+// paths keep the cheap output chainable, because every folder-aware verb
+// accepts a path wherever it accepts an id. Callers that need ids can ask for
+// output="summary" or output="raw".
+//
+// Shape (the leading "|" marks the block; it is not part of the output):
+//
+//	|- Inbox — 12 unread / 340
+//	|  - 01 Projects — 0 / 58
+//	|    - Swedfund — 0 / 8
+//	|- Archive — 0 / 1204
+//	|
+//	|4 folders. Target one with folder="Inbox/01 Projects".
+//
+// The word "unread" is printed only when the unread count is non-zero, so the
+// common case costs three tokens instead of four. Subtrees that failed to load
+// and listings that Graph truncated are annotated inline; neither is ever
+// silently omitted.
+//
+// Unexpanded and unreturned subfolders are annotated differently on purpose.
+// "Not looked at" is fixed by recursing or raising max_depth and says so;
+// "looked at, Graph withheld it" cannot be fixed by the caller, so it must not
+// suggest a retry that would loop forever.
 //
 // Parameters:
-//   - folders: slice of folder maps (from serializeMailFolder), each expected
-//     to contain "displayName", "unreadItemCount", and "totalItemCount" keys.
+//   - listing: the folder listing to render, including its root path and
+//     root-level truncation flag.
 //
-// Returns a formatted plain-text string. Returns "No folders found." when the
-// slice is nil or empty.
+// Returns the rendered markdown. Returns a "no folders" sentence naming the
+// parent folder when the listing is empty.
 //
 // Side effects: none.
-func FormatMailFoldersText(folders []map[string]any) string {
-	if len(folders) == 0 {
+func FormatFolderTreeText(listing FolderListing) string {
+	if len(listing.Nodes) == 0 {
+		if listing.Root != "" {
+			return fmt.Sprintf("No subfolders found under %q.", listing.Root)
+		}
 		return "No folders found."
 	}
 
 	var b strings.Builder
-	for i, f := range folders {
-		name, _ := f["displayName"].(string)
+	formatFolderNodes(&b, listing.Nodes, 0, listing.Recursive)
+
+	if listing.Truncated {
+		b.WriteString("\n(More folders exist than were returned. Raise max_results to see the rest.)\n")
+	}
+
+	total := CountFolders(listing.Nodes)
+	noun := "folders"
+	if total == 1 {
+		noun = "folder"
+	}
+	fmt.Fprintf(&b, "\n%d %s. Target one with folder=%q.", total, noun, deepestFolderPath(listing.Nodes))
+
+	return b.String()
+}
+
+// formatFolderNodes recursively writes one markdown list item per folder,
+// indenting two spaces per level.
+//
+// Parameters:
+//   - b: the builder to write to.
+//   - nodes: the folders at the current level.
+//   - depth: the current nesting depth (0 at the requested level).
+//   - recursive: whether the caller asked to descend, which selects the wording
+//     of the unexplored-subfolder hint.
+//
+// Side effects: writes to b.
+func formatFolderNodes(b *strings.Builder, nodes []FolderNode, depth int, recursive bool) {
+	indent := strings.Repeat("  ", depth)
+	for _, n := range nodes {
+		name := n.Name
 		if name == "" {
 			name = "(Unnamed)"
 		}
-		unread := toInt(f["unreadItemCount"])
-		total := toInt(f["totalItemCount"])
-		fmt.Fprintf(&b, "%d. %s (%d unread, %d total)\n", i+1, name, unread, total)
+
+		counts := fmt.Sprintf("%d / %d", n.Unread, n.Total)
+		if n.Unread > 0 {
+			counts = fmt.Sprintf("%d unread / %d", n.Unread, n.Total)
+		}
+		fmt.Fprintf(b, "%s- %s — %s", indent, name, counts)
+
+		switch {
+		case n.Err != "":
+			fmt.Fprintf(b, " [subfolders unavailable: %s]", n.Err)
+		case n.Truncated:
+			b.WriteString(" [more subfolders not shown — raise max_results]")
+		case n.UnexploredChildren() > 0:
+			// Actionable: the caller can reach these by asking for them.
+			fix := "use recursive=true"
+			if recursive {
+				fix = "increase max_depth"
+			}
+			fmt.Fprintf(b, " [+%d subfolders — %s]", n.UnexploredChildren(), fix)
+		case n.UnreturnedChildren() > 0:
+			// NOT actionable: Graph counted these and then withheld them.
+			// Suggesting a retry here sends the caller into a loop.
+			fmt.Fprintf(b, " [%s hidden]", pluralFolders(n.UnreturnedChildren()))
+		}
+		b.WriteString("\n")
+
+		formatFolderNodes(b, n.Children, depth+1, recursive)
 	}
+}
 
-	fmt.Fprintf(&b, "\n%d folder(s) total.", len(folders))
+// pluralFolders renders a subfolder count with the right noun, e.g.
+// "1 subfolder" or "3 subfolders".
+//
+// Parameters:
+//   - n: the count to render.
+//
+// Returns the formatted count and noun.
+//
+// Side effects: none.
+func pluralFolders(n int) string {
+	if n == 1 {
+		return "1 subfolder"
+	}
+	return fmt.Sprintf("%d subfolders", n)
+}
 
-	return b.String()
+// deepestFolderPath returns the path of the deepest folder in the tree, which
+// the footer offers as a worked example of the `folder` parameter. Ties are
+// broken by first occurrence so the output is deterministic.
+//
+// Parameters:
+//   - nodes: the folders to search.
+//
+// Returns the deepest path, or "" when nodes is empty.
+//
+// Side effects: none.
+func deepestFolderPath(nodes []FolderNode) string {
+	best, _ := deepestFolderPathAt(nodes, 0)
+	return best
+}
+
+// deepestFolderPathAt is the depth-tracking recursion behind
+// deepestFolderPath. It returns the deepest path found in nodes and the depth
+// at which it was found; depth -1 means nothing was found.
+func deepestFolderPathAt(nodes []FolderNode, depth int) (string, int) {
+	bestPath, bestDepth := "", -1
+	for _, n := range nodes {
+		if depth > bestDepth {
+			bestPath, bestDepth = n.Path, depth
+		}
+		if p, d := deepestFolderPathAt(n.Children, depth+1); d > bestDepth {
+			bestPath, bestDepth = p, d
+		}
+	}
+	return bestPath, bestDepth
 }
 
 // toInt converts a numeric value from a map[string]any to int. Handles int32

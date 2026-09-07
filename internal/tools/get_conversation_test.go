@@ -57,7 +57,7 @@ func TestGetConversationTool_Registration(t *testing.T) {
 // TestGetConversationTool_HasParameters validates tool parameters are defined.
 func TestGetConversationTool_HasParameters(t *testing.T) {
 	schema := NewGetConversationTool().InputSchema
-	for _, p := range []string{"message_id", "conversation_id", "max_results", "account", "output"} {
+	for _, p := range []string{"message_id", "conversation_id", "max_results", "account", "output", "body_mode"} {
 		if _, ok := schema.Properties[p]; !ok {
 			t.Errorf("missing property %q", p)
 		}
@@ -245,5 +245,119 @@ func TestGetConversation_ProvenancePerMessage(t *testing.T) {
 	}
 	if second["provenance"] != false {
 		t.Errorf("msg[1].provenance = %v, want false", second["provenance"])
+	}
+}
+
+// TestGetConversation_PreviewModeIsUnchanged verifies that the default path
+// still asks Graph for no body and sends no request preference, so CR-0068
+// leaves the cheap thread read exactly as CR-0051 left it.
+func TestGetConversation_PreviewModeIsUnchanged(t *testing.T) {
+	var rawQuery string
+	var prefer []string
+	client, srv := newTestGraphClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawQuery = r.URL.RawQuery
+		prefer = r.Header.Values("Prefer")
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		fmt.Fprint(w, `{"value":[{"id":"a","subject":"First","conversationId":"c1","receivedDateTime":"2026-04-01T09:00:00Z","bodyPreview":"hi"}]}`)
+	}))
+	defer srv.Close()
+
+	handler := NewHandleGetConversation(graph.RetryConfig{}, 30*time.Second, "")
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"conversation_id": "c1"}
+	result, err := handler(auth.WithGraphClient(context.Background(), client), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", result.Content[0].(mcp.TextContent).Text)
+	}
+	if selectRequestsBody(t, rawQuery) {
+		t.Errorf("default $select requested a body: %q", rawQuery)
+	}
+	if len(prefer) != 0 {
+		t.Errorf("default call sent Prefer %v, want none", prefer)
+	}
+}
+
+// TestGetConversation_TextModeEscalatesEveryMessage verifies that body_mode
+// applies to the whole thread: one Prefer header, `body` in $select, and every
+// message rendered with its full body instead of a preview.
+func TestGetConversation_TextModeEscalatesEveryMessage(t *testing.T) {
+	var rawQuery string
+	var prefer []string
+	client, srv := newTestGraphClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawQuery = r.URL.RawQuery
+		prefer = r.Header.Values("Prefer")
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		fmt.Fprint(w, `{"value":[`+
+			`{"id":"a","subject":"First","conversationId":"c1","receivedDateTime":"2026-04-01T09:00:00Z","bodyPreview":"hi","body":{"contentType":"text","content":"First full body."}},`+
+			`{"id":"b","subject":"Second","conversationId":"c1","receivedDateTime":"2026-04-01T10:00:00Z","bodyPreview":"hello","body":{"contentType":"text","content":"Second full body."}}`+
+			`]}`)
+	}))
+	defer srv.Close()
+
+	handler := NewHandleGetConversation(graph.RetryConfig{}, 30*time.Second, "")
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"conversation_id": "c1", "body_mode": "text"}
+	result, err := handler(auth.WithGraphClient(context.Background(), client), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", result.Content[0].(mcp.TextContent).Text)
+	}
+
+	if !selectRequestsBody(t, rawQuery) {
+		t.Errorf("$select did not include body: %q", rawQuery)
+	}
+	if len(prefer) != 1 || prefer[0] != `outlook.body-content-type="text"` {
+		t.Errorf("Prefer = %v, want a single outlook.body-content-type=\"text\"", prefer)
+	}
+
+	out := result.Content[0].(mcp.TextContent).Text
+	for _, want := range []string{"First full body.", "Second full body."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("thread output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Preview:") {
+		t.Errorf("thread still rendered previews after escalation:\n%s", out)
+	}
+}
+
+// TestGetConversation_TruncationHintPrintedOnce verifies that a thread of
+// truncated previews marks each entry compactly and states the escalation once
+// in the footer. Repeating a full sentence per message would spend on the hint
+// the tokens the preview tier exists to save.
+func TestGetConversation_TruncationHintPrintedOnce(t *testing.T) {
+	long := strings.Repeat("a", 255)
+	client, srv := newTestGraphClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		fmt.Fprintf(w, `{"value":[`+
+			`{"id":"a","subject":"First","conversationId":"c1","receivedDateTime":"2026-04-01T09:00:00Z","bodyPreview":%q},`+
+			`{"id":"b","subject":"Second","conversationId":"c1","receivedDateTime":"2026-04-01T10:00:00Z","bodyPreview":%q}`+
+			`]}`, long, long)
+	}))
+	defer srv.Close()
+
+	handler := NewHandleGetConversation(graph.RetryConfig{}, 30*time.Second, "")
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"conversation_id": "c1"}
+	result, err := handler(auth.WithGraphClient(context.Background(), client), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := result.Content[0].(mcp.TextContent).Text
+
+	// Count line-terminated markers: the footer hint also names the marker.
+	if got := strings.Count(out, conversationPreviewEllipsis+"\n"); got != 2 {
+		t.Errorf("ellipsis marker ends %d preview lines, want 2 (one per truncated preview)", got)
+	}
+	if got := strings.Count(out, conversationPreviewTruncatedHint); got != 1 {
+		t.Errorf("escalation hint appears %d times, want exactly 1", got)
 	}
 }

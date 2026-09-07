@@ -346,12 +346,20 @@ func formatReceivedDate(rfc3339 string) string {
 
 // FormatMessageDetailText formats a single serialized message map into a
 // human-readable plain-text detail view. Includes subject, sender, recipients,
-// date, importance (when not "normal"), attachment indicator, and body preview.
+// date, importance (when not "normal"), attachment indicator, and the message
+// body.
+//
+// The body is whichever of the two the message map carries. When a body_mode
+// escalation attached a "body" map, its full content is printed. Otherwise the
+// 255-character "bodyPreview" is printed, followed by an in-band notice when
+// that preview was cut off — before CR-0068 the preview simply stopped
+// mid-word and the reader had no way to tell, nor any parameter to escalate to.
 //
 // Parameters:
 //   - message: a message map (from SerializeSummaryMessage or SerializeMessage),
 //     expected to contain "subject", "from", "toRecipients", "receivedDateTime",
-//     "importance", "hasAttachments", and "bodyPreview" keys.
+//     "importance", "hasAttachments", and "bodyPreview" keys, and optionally a
+//     "body" map.
 //
 // Returns a formatted plain-text string.
 //
@@ -402,10 +410,15 @@ func FormatMessageDetailText(message map[string]any) string {
 		b.WriteString("[Created by this MCP server]\n")
 	}
 
-	// Body preview.
-	bodyPreview, _ := message["bodyPreview"].(string)
-	if bodyPreview != "" {
+	// Body: the escalated full body when present, otherwise the preview with an
+	// explicit truncation notice.
+	if content := messageBodyContent(message); content != "" {
+		fmt.Fprintf(&b, "\n%s\n", content)
+	} else if bodyPreview, _ := message["bodyPreview"].(string); bodyPreview != "" {
 		fmt.Fprintf(&b, "\n%s\n", bodyPreview)
+		if isTruncatedPreview(bodyPreview) {
+			fmt.Fprintf(&b, "%s\n", bodyPreviewTruncatedNotice)
+		}
 	}
 
 	return b.String()
@@ -444,7 +457,13 @@ func formatRecipientAddresses(recipients any) string {
 
 // FormatConversationText formats a serialized conversation thread into a
 // numbered plain-text listing ordered chronologically. Each entry shows the
-// message subject, sender address, received date, and a body preview.
+// message subject, sender address, received date, and either a body preview or
+// the full body when a body_mode escalation attached one.
+//
+// A thread is the worst case for silent truncation: every entry can be cut at
+// 255 characters. Individual truncated previews are marked with a compact
+// ellipsis and the actionable escalation hint is printed once in the footer,
+// rather than repeating a full sentence up to 100 times.
 //
 // Parameters:
 //   - thread: a map produced by graph.SerializeConversationThread, expected to
@@ -465,6 +484,7 @@ func FormatConversationText(thread map[string]any) string {
 	if convoID != "" {
 		fmt.Fprintf(&b, "Conversation: %s\n\n", convoID)
 	}
+	anyPreviewTruncated := false
 	for i, m := range messages {
 		subject, _ := m["subject"].(string)
 		if subject == "" {
@@ -490,8 +510,13 @@ func FormatConversationText(thread map[string]any) string {
 			b.WriteString("   [Created by this MCP server]\n")
 		}
 
-		bodyPreview, _ := m["bodyPreview"].(string)
-		if bodyPreview != "" {
+		if content := messageBodyContent(m); content != "" {
+			fmt.Fprintf(&b, "   Body:\n%s\n", content)
+		} else if bodyPreview, _ := m["bodyPreview"].(string); bodyPreview != "" {
+			if isTruncatedPreview(bodyPreview) {
+				bodyPreview += conversationPreviewEllipsis
+				anyPreviewTruncated = true
+			}
 			fmt.Fprintf(&b, "   Preview: %s\n", bodyPreview)
 		}
 
@@ -500,6 +525,9 @@ func FormatConversationText(thread map[string]any) string {
 		}
 	}
 	fmt.Fprintf(&b, "\n%d message(s) in thread.", len(messages))
+	if anyPreviewTruncated {
+		fmt.Fprintf(&b, "\n%s", conversationPreviewTruncatedHint)
+	}
 	return b.String()
 }
 

@@ -14,28 +14,6 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
 
-// TestBodyContentTypeDetection validates that body content containing a "<"
-// character is detected as HTML, while plain text is detected as TEXT.
-func TestBodyContentTypeDetection(t *testing.T) {
-	tests := []struct {
-		name     string
-		body     string
-		wantHTML bool
-	}{
-		{"HTML body", "<p>Hello</p>", true},
-		{"text body", "Hello world", false},
-		{"body with angle bracket", "x < y", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			isHTML := strings.Contains(tt.body, "<")
-			if isHTML != tt.wantHTML {
-				t.Errorf("Contains(<) = %v, want %v for %q", isHTML, tt.wantHTML, tt.body)
-			}
-		})
-	}
-}
-
 // TestAttendeesJSONParsing validates that a well-formed attendees JSON array
 // is correctly parsed into a slice of Attendeeable objects with the expected
 // email, name, and type fields.

@@ -242,17 +242,14 @@ func HandleCreateEvent(retryCfg graph.RetryConfig, timeout time.Duration, defaul
 		end.SetTimeZone(&endTZ)
 		event.SetEnd(end)
 
-		// Optional: body with content type auto-detection.
+		// Optional: body. An explicit content_type wins; otherwise the content
+		// type is inferred from the body text. See event_body.go.
 		if bodyStr, ok := args["body"].(string); ok && bodyStr != "" {
-			body := models.NewItemBody()
-			if strings.Contains(bodyStr, "<") {
-				contentType := models.HTML_BODYTYPE
-				body.SetContentType(&contentType)
-			} else {
-				contentType := models.TEXT_BODYTYPE
-				body.SetContentType(&contentType)
+			bodyTypeStr, _ := args[eventContentTypeParam].(string)
+			body, bodyErr := newEventBody(bodyStr, bodyTypeStr)
+			if bodyErr != nil {
+				return mcp.NewToolResultError(bodyErr.Error()), nil
 			}
-			body.SetContent(&bodyStr)
 			event.SetBody(body)
 		}
 

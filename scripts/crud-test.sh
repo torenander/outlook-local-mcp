@@ -10,7 +10,11 @@
 #   scripts/crud-test.sh [account_label]
 #
 # Defaults: account_label=default, model=claude-sonnet-4-6, thinking effort=low.
-# Override via env: ACCOUNT, MODEL, THINKING.
+# Override via env: ACCOUNT, MODEL, THINKING, MCP_CONFIG.
+#
+#   MCP_CONFIG=/path/to/mcp.json  run against a specific MCP server
+#                                 definition (e.g. an uninstalled build
+#                                 under test) instead of the ambient config.
 set -euo pipefail
 
 ACCOUNT="${ACCOUNT:-${1:-default}}"
@@ -20,26 +24,57 @@ THINKING="${THINKING:-low}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Precondition: a connected account must exist. An account is "connected" when
-# it is registered in accounts.json AND has a corresponding {label}_auth_record.json.
+# Precondition: a connected account must exist. There are two ways an account
+# can be connected, and the harness must accept both or it cannot run against
+# a default install.
+#
+#  1. Explicitly registered: listed in accounts.json AND has a matching
+#     {label}_auth_record.json.
+#  2. Implicit default (CR-0064): the server registers an in-memory "default"
+#     account from the env config when accounts.json neither covers the cfg
+#     identity nor contains a "default" label. That account is never written
+#     to accounts.json, so its only on-disk trace is the singular
+#     auth_record.json. A default install has exactly this and no
+#     accounts.json at all.
+#
+# The shell cannot resolve the cfg client_id/tenant_id the way
+# shouldAddImplicitDefault does in main.go, so condition 2 is approximated as
+# "auth_record.json exists and accounts.json declares no 'default' label".
+# A false positive surfaces as a visible failed run rather than a silent skip.
+#
 # If the requested ACCOUNT label is not connected, fall back to the first
 # connected account. If none are connected, abort and instruct the user.
 ACCOUNTS_DIR="${HOME}/.outlook-local-mcp"
 ACCOUNTS_JSON="${ACCOUNTS_DIR}/accounts.json"
-if [[ ! -s "$ACCOUNTS_JSON" ]]; then
-  echo "ERROR: no accounts registered at ${ACCOUNTS_JSON}." >&2
-  echo "Run the server interactively and add an account via the 'account.login' verb before retrying." >&2
-  exit 2
+
+CONNECTED=()
+
+# Source 1: explicitly registered accounts.
+if [[ -s "$ACCOUNTS_JSON" ]]; then
+  mapfile -t CONNECTED < <(jq -r '.accounts[].label' "$ACCOUNTS_JSON" 2>/dev/null \
+    | while read -r label; do
+        [[ -n "$label" && -s "${ACCOUNTS_DIR}/${label}_auth_record.json" ]] && echo "$label"
+      done)
 fi
 
-mapfile -t CONNECTED < <(jq -r '.accounts[].label' "$ACCOUNTS_JSON" 2>/dev/null \
-  | while read -r label; do
-      [[ -n "$label" && -s "${ACCOUNTS_DIR}/${label}_auth_record.json" ]] && echo "$label"
-    done)
+# Source 2: the implicit "default" account.
+if [[ -s "${ACCOUNTS_DIR}/auth_record.json" ]]; then
+  HAS_DEFAULT_ENTRY=0
+  if [[ -s "$ACCOUNTS_JSON" ]] \
+    && jq -e '.accounts[]? | select(.label == "default")' "$ACCOUNTS_JSON" >/dev/null 2>&1; then
+    HAS_DEFAULT_ENTRY=1
+  fi
+  if [[ $HAS_DEFAULT_ENTRY -eq 0 ]] && ! printf '%s\n' "${CONNECTED[@]:-}" | grep -qx "default"; then
+    CONNECTED+=("default")
+    echo "==> Using implicit 'default' account (auth_record.json present, not in accounts.json)."
+  fi
+fi
 
 if [[ ${#CONNECTED[@]} -eq 0 ]]; then
-  echo "ERROR: no connected accounts found (no {label}_auth_record.json in ${ACCOUNTS_DIR})." >&2
-  echo "Run the server interactively and authenticate an account via 'account.login' before retrying." >&2
+  echo "ERROR: no connected accounts found in ${ACCOUNTS_DIR}." >&2
+  echo "Expected either accounts.json entries with matching {label}_auth_record.json," >&2
+  echo "or a singular auth_record.json from the implicit default account." >&2
+  echo "Run the server interactively and authenticate via the 'account.login' verb before retrying." >&2
   exit 2
 fi
 
@@ -65,10 +100,27 @@ echo "    stream: ${STREAM}"
 # --disable-slash-commands prevents the headless agent from invoking the
 # outlook-llm-tests skill (which would shell back into `make crud-test` and
 # recurse). The agent must execute the test steps directly.
+# MCP_CONFIG optionally points the run at a specific MCP server definition
+# instead of the caller's ambient configuration. This exists so a build can be
+# verified BEFORE it is installed over the binary that every other session
+# uses: point MCP_CONFIG at a JSON file whose command is the build under test.
+# --strict-mcp-config suppresses the ambient servers so the run cannot silently
+# fall back to the installed binary and report a pass for the wrong code.
+MCP_ARGS=()
+if [[ -n "${MCP_CONFIG:-}" ]]; then
+  if [[ ! -s "$MCP_CONFIG" ]]; then
+    echo "ERROR: MCP_CONFIG=${MCP_CONFIG} is missing or empty." >&2
+    exit 2
+  fi
+  MCP_ARGS=(--mcp-config "$MCP_CONFIG" --strict-mcp-config)
+  echo "==> Using MCP config override: ${MCP_CONFIG}"
+fi
+
 /usr/bin/time -p claude --dangerously-skip-permissions \
   --model "$MODEL" \
   --effort "$THINKING" \
   --disable-slash-commands \
+  "${MCP_ARGS[@]}" \
   --output-format stream-json --verbose \
   -p "$PROMPT" \
   > "$STREAM" 2> "$TIMEFILE"

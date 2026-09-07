@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
 )
 
@@ -76,24 +77,87 @@ func IsAuthError(err error) bool {
 
 // FormatAuthError returns an LLM-actionable error message for the given
 // authentication error. The output includes a plain-language description of
-// the failure and specific MCP tool names the LLM should call to recover.
-// Raw Azure SDK class names (e.g., DeviceCodeCredential,
-// InteractiveBrowserCredential) are stripped from the output so the LLM
-// does not hallucinate SDK-level troubleshooting advice.
+// the failure and the MCP verbs the LLM should call to recover. Raw Azure SDK
+// class names (e.g., DeviceCodeCredential, InteractiveBrowserCredential) are
+// stripped from the output so the LLM does not hallucinate SDK-level
+// troubleshooting advice.
+//
+// The guidance is method-agnostic. Use FormatAuthErrorFor when the active
+// authentication method is known, so the message can name the one recovery
+// path that applies.
 //
 // Parameters:
 //   - err: the authentication error to format. Must not be nil.
 //
 // Returns a multi-line string containing a plain-language description and
-// recovery instructions referencing MCP tool names.
+// recovery instructions referencing MCP verbs.
 //
 // FormatAuthError is safe for concurrent use.
 func FormatAuthError(err error) string {
-	description := classifyAuthError(err)
-	return description + "\n\nTo recover:\n" +
-		"1. Call account_list to check which accounts need authentication\n" +
-		"2. Call account_add with the account label to start a new authentication flow\n" +
-		"3. After authenticating, retry your original request"
+	return FormatAuthErrorFor(err, "")
+}
+
+// FormatAuthErrorFor returns an LLM-actionable error message tailored to the
+// authentication method in use.
+//
+// Before CR-0067 the guidance told the LLM to call account_add, which creates
+// a *new* account rather than re-authenticating the existing one — following
+// it produced duplicate registry entries instead of a working session. The
+// correct verb for an account that already exists is account.login; under the
+// auth_code method the sign-in can additionally be finished in band with
+// system.complete_auth.
+//
+// Parameters:
+//   - err: the authentication error to format. Must not be nil.
+//   - authMethod: the active method ("auth_code", "browser", "device_code"),
+//     or "" when it is not known.
+//
+// Returns a multi-line string containing a plain-language description and
+// numbered recovery steps.
+//
+// FormatAuthErrorFor is safe for concurrent use.
+func FormatAuthErrorFor(err error, authMethod string) string {
+	return classifyAuthError(err) + "\n\nTo recover:\n" + recoverySteps(authMethod)
+}
+
+// recoverySteps returns the numbered recovery instructions for the given
+// authentication method.
+//
+// Every variant starts from account.list so the LLM discovers which account is
+// disconnected instead of guessing a label, and ends by retrying the original
+// request.
+//
+// Parameters:
+//   - authMethod: the active method, or "" when it is not known.
+//
+// Returns the instruction block, without a trailing newline.
+func recoverySteps(authMethod string) string {
+	const listStep = "1. Call account with operation=\"list\" to see which account is disconnected\n"
+	const retryStep = "\n3. Retry your original request"
+
+	switch authMethod {
+	case "auth_code":
+		return listStep +
+			"2. Call account with operation=\"login\" and that account's label. A browser opens; " +
+			"after signing in, copy the full URL from the address bar. Paste it when prompted, or " +
+			"call system with operation=\"complete_auth\" and redirect_url set to that URL" +
+			retryStep
+	case "device_code":
+		return listStep +
+			"2. Call account with operation=\"login\" and that account's label, then open the " +
+			"sign-in link it returns and approve the request" +
+			retryStep
+	case "browser":
+		return listStep +
+			"2. Call account with operation=\"login\" and that account's label, then complete the " +
+			"sign-in in the browser window that opens" +
+			retryStep
+	default:
+		return listStep +
+			"2. Call account with operation=\"login\" and that account's label to re-authenticate it. " +
+			"Use account with operation=\"add\" only when the account is not registered at all" +
+			retryStep
+	}
 }
 
 // classifyAuthError returns a plain-language description of the authentication
@@ -125,14 +189,60 @@ func classifyAuthError(err error) string {
 		return "The server received an unauthorized response from Microsoft Graph. The account token may have expired or been revoked."
 	}
 
-	// Check for "authentication required" signals.
-	if strings.Contains(msg, "authentication required") {
+	// azidentity's AuthenticationRequiredError, produced when a silent-only
+	// credential cannot satisfy GetToken from cache (CR-0067 A1). Its message
+	// ends in "Call Authenticate to authenticate a user interactively", which
+	// is SDK-level advice the LLM cannot act on and must not be shown.
+	var authRequiredErr *azidentity.AuthenticationRequiredError
+	if errors.As(err, &authRequiredErr) {
 		return "Authentication is required for this account."
 	}
 
-	// Generic auth failure — strip SDK class names.
+	// Bare "authentication required" carries no detail, so it must be matched
+	// last among the string checks. Before CR-0067 it was tested before the
+	// generic branch and swallowed the flow-specific text the middleware
+	// composes — for example "authentication required: device code prompt was
+	// not received from Entra ID" degraded to "Authentication is required for
+	// this account.", hiding the actual failure from the user.
 	sanitized := stripSDKClassNames(msg)
+	if detail, ok := authRequiredDetail(sanitized); ok {
+		if detail == "" {
+			return "Authentication is required for this account."
+		}
+		return "Authentication is required for this account: " + detail
+	}
+
+	// Generic auth failure — strip SDK class names.
 	return "Authentication failed for this account: " + sanitized
+}
+
+// authRequiredPrefix is the marker the middleware and the credentials use to
+// signal that interactive authentication is needed.
+const authRequiredPrefix = "authentication required"
+
+// authRequiredDetail splits an "authentication required" signal into the
+// marker and whatever explanation follows it.
+//
+// The marker is located anywhere in the message rather than only at the start,
+// because credentials prefix it with their own type name (for example
+// "AuthCodeCredential: authentication required"). Text before the marker is
+// discarded; text after it is the detail worth showing.
+//
+// Parameters:
+//   - msg: the sanitized error message.
+//
+// Returns the detail text (empty when nothing follows the marker) and true
+// when msg is an authentication-required signal, or "" and false when it is
+// not.
+func authRequiredDetail(msg string) (string, bool) {
+	trimmed := strings.TrimSpace(msg)
+	idx := strings.Index(strings.ToLower(trimmed), authRequiredPrefix)
+	if idx < 0 {
+		return "", false
+	}
+	detail := strings.TrimSpace(trimmed[idx+len(authRequiredPrefix):])
+	detail = strings.TrimSpace(strings.TrimLeft(detail, ":-"))
+	return strings.TrimRight(detail, "."), true
 }
 
 // sdkClassNames lists Azure SDK class names that must be stripped from

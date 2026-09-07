@@ -27,6 +27,17 @@ func EnsureEmail(ctx context.Context, entry *AccountEntry) {
 		return
 	}
 
+	// Skip while an interactive sign-in holds the credential's internal lock.
+	// This lookup only enriches a response with a display address, and the
+	// Graph call underneath it would block on a mutex that ignores ctx
+	// deadlines — hanging callers such as account.list for the whole sign-in
+	// (CR-0067 A4; see inflight.go). The address is resolved on a later call.
+	if InteractiveAuthInFlight() {
+		slog.DebugContext(ctx, "skipping account email lookup, authentication in progress",
+			"label", entry.Label)
+		return
+	}
+
 	entry.emailMu.Lock()
 	defer entry.emailMu.Unlock()
 

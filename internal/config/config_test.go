@@ -685,7 +685,9 @@ func TestLoadConfig_AccountsPathEnvVar(t *testing.T) {
 
 // TestInferAuthMethod_DefaultDeviceCode validates that when the default client
 // ID (outlook-desktop UUID) is used with no explicit auth method, device_code
-// is returned with source "inferred".
+// is returned with source "inferred". CR-0067 tested auth_code here and
+// reverted: Microsoft's anti-phishing interstitial on the nativeclient
+// redirect page prevents that flow from completing.
 func TestInferAuthMethod_DefaultDeviceCode(t *testing.T) {
 	got, source := InferAuthMethod("d3590ed6-52b3-4102-aeff-aad2292ab01c", "")
 	if got != "device_code" {
@@ -748,8 +750,8 @@ func TestLoadConfig_DefaultClientIDOutlookDesktop(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_DefaultAuthMethodDeviceCode validates that LoadConfig defaults
-// to device_code when no auth method or client ID is set.
+// TestLoadConfig_DefaultAuthMethodDeviceCode validates that LoadConfig
+// defaults to device_code when no auth method or client ID is set.
 func TestLoadConfig_DefaultAuthMethodDeviceCode(t *testing.T) {
 	clearOutlookEnvVars(t)
 
@@ -994,6 +996,13 @@ func TestInferAuthMethod_ReturnsSource(t *testing.T) {
 			explicit:   "",
 			wantMethod: "device_code",
 			wantSource: "inferred",
+		},
+		{
+			name:       "explicit auth_code overrides the inferred device_code",
+			clientID:   "d3590ed6-52b3-4102-aeff-aad2292ab01c",
+			explicit:   "auth_code",
+			wantMethod: "auth_code",
+			wantSource: "explicit",
 		},
 		{
 			name:       "custom client default",

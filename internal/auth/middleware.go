@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/pkg/browser"
@@ -106,13 +104,13 @@ type authMiddlewareState struct {
 	// Checked at middleware entry to avoid starting duplicate flows.
 	pendingAuth atomic.Bool
 
-	// pendingDone is closed when the background auth goroutine completes.
-	// Read via select to check completion without blocking.
-	pendingDone chan struct{}
-
-	// pendingErr holds the result of the background auth (nil on success).
-	// Only valid to read after pendingDone is closed.
-	pendingErr error
+	// pending points at the in-flight (or most recently finished) background
+	// authentication attempt. It is an atomic pointer, and the attempt's own
+	// fields are published through its done channel, so middleware entry can
+	// inspect the outcome without taking mu — which the completing goroutine
+	// could not take anyway, since handleAuthError holds mu while waiting on
+	// it (CR-0067 A4).
+	pending atomic.Pointer[pendingAuthAttempt]
 
 	// openBrowser opens a URL in the system browser. Defaults to
 	// browser.OpenURL in production; tests inject a no-op to prevent
@@ -185,21 +183,35 @@ func AuthMiddleware(cred Authenticator, authRecordPath string, authMethod string
 
 	middleware := func(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			// Install the per-request account slot so AccountResolver, which
+			// runs inside this middleware, can report which account it picked
+			// (CR-0067 A6). See account_slot.go for why a mutable slot is
+			// needed instead of a plain context value.
+			ctx, _ = withAccountAuthSlot(ctx)
+
+			// Verbs that exist to repair authentication must never be gated on
+			// authentication being healthy (CR-0067 A4).
+			recovery := isRecoveryOperation(request)
+
 			// Check if a background authentication flow completed.
 			if state.pendingAuth.Load() {
-				select {
-				case <-state.pendingDone:
-					state.pendingAuth.Store(false)
-					if state.pendingErr != nil {
-						return mcp.NewToolResultError(FormatAuthError(state.pendingErr)), nil
+				running, pendingErr := state.pendingOutcome()
+				switch {
+				case running && recovery:
+					// Let the user reach account.login / account.list /
+					// account.refresh while a flow is still outstanding.
+					return next(ctx, request)
+				case running:
+					return mcp.NewToolResultError(pendingAuthMessage(state.authMethod)), nil
+				default:
+					state.settle()
+					if pendingErr != nil {
+						return mcp.NewToolResultError(FormatAuthErrorFor(pendingErr, state.authMethod)), nil
 					}
 					if state.authenticated.CompareAndSwap(false, true) {
 						slog.Info("server authenticated and ready to serve")
 					}
 					// Auth succeeded, fall through to execute the tool call.
-				default:
-					// Auth still in progress.
-					return mcp.NewToolResultError(pendingAuthMessage(state.authMethod)), nil
 				}
 			}
 
@@ -208,6 +220,22 @@ func AuthMiddleware(cred Authenticator, authRecordPath string, authMethod string
 			// the inner handler (which would block for the Graph API timeout)
 			// and go directly to the re-authentication flow.
 			if !state.preAuthenticated.Load() && !state.authenticated.Load() {
+				// Recovery verbs read and repair the account registry; they do
+				// not need a working default credential, so never divert them
+				// into an authentication prompt (CR-0067 A4).
+				if recovery {
+					return next(ctx, request)
+				}
+				// Try the token cache before assuming the credential is cold.
+				// The startup probe deliberately skips some credential types,
+				// so "not pre-authenticated" does not mean "no cached token"
+				// (CR-0067 A1).
+				if TrySilentToken(ctx, state.cred, state.scopes) {
+					if state.authenticated.CompareAndSwap(false, true) {
+						slog.Info("server authenticated and ready to serve")
+					}
+					return next(ctx, request)
+				}
 				slog.Info("fresh credential detected, skipping Graph API call to present auth prompt immediately")
 				freshErr := fmt.Errorf("authentication required: credential not yet authenticated")
 				return state.handleAuthError(ctx, next, request, freshErr)
@@ -239,8 +267,10 @@ func AuthMiddleware(cred Authenticator, authRecordPath string, authMethod string
 }
 
 // handleAuthError coordinates re-authentication when a tool call encounters
-// an authentication error. It acquires the re-auth mutex and delegates to
-// the appropriate flow based on the configured authMethod:
+// an authentication error. It acquires the re-auth mutex, resolves the
+// credential for the account the call actually targeted, attempts a silent
+// token refresh, and only then delegates to an interactive flow based on the
+// resolved authMethod:
 //
 // For "browser" auth (handleBrowserAuth):
 //
@@ -255,8 +285,14 @@ func AuthMiddleware(cred Authenticator, authRecordPath string, authMethod string
 //  3. Waits for the device code prompt, auth completion, or timeout.
 //  4. Returns the device code prompt as a tool result for the user to act on.
 //
+// Before any of those flows runs, a silent token acquisition is attempted via
+// TrySilentToken. When it succeeds the original tool call is retried
+// immediately and the user is never prompted (CR-0067 A1).
+//
 // Subsequent tool calls while a background flow is in progress receive a
-// "still in progress" message until the user completes login.
+// "still in progress" message until the user completes login — except calls
+// to the account domain, which stay reachable so the user can recover
+// (CR-0067 A4).
 //
 // Parameters:
 //   - ctx: the tool handler context containing the MCPServer.
@@ -280,16 +316,28 @@ func (s *authMiddlewareState) handleAuthError(
 		return mcp.NewToolResultError(pendingAuthMessage(s.authMethod)), nil
 	}
 
-	// Resolve per-account auth details from context when available
-	// (injected by AccountResolver). Fall back to the closure credential
-	// for backward compatibility.
+	// Resolve per-account auth details for this request. resolvedAccountAuth
+	// reads the slot that AccountResolver filled in during the handler call
+	// (CR-0067 A6) and falls back to a directly injected context value. When
+	// neither is present — for example on the fresh-credential fast path,
+	// which never reaches AccountResolver — the closure credential is used.
 	cred := s.cred
 	authRecordPath := s.authRecordPath
 	authMethod := s.authMethod
-	if aa, ok := AccountAuthFromContext(ctx); ok {
+	if aa, ok := resolvedAccountAuth(ctx); ok {
 		cred = aa.Authenticator
 		authRecordPath = aa.AuthRecordPath
 		authMethod = aa.AuthMethod
+	}
+
+	// Before showing the user anything, ask the token cache. A revoked-looking
+	// 401 from Graph is often just an expired access token that the cached
+	// refresh token can renew (CR-0067 A1).
+	if TrySilentToken(ctx, cred, s.scopes) {
+		if s.authenticated.CompareAndSwap(false, true) {
+			slog.Info("server authenticated and ready to serve")
+		}
+		return next(ctx, request)
 	}
 
 	if authMethod == "auth_code" {
@@ -344,7 +392,7 @@ func (s *authMiddlewareState) handleAuthCodeAuth(
 	// Obtain the authorization URL.
 	authURL, err := acf.AuthCodeURL(ctx, s.scopes)
 	if err != nil {
-		return mcp.NewToolResultError(FormatAuthError(err)), nil
+		return mcp.NewToolResultError(FormatAuthErrorFor(err, "auth_code")), nil
 	}
 
 	// Open the authorization URL in the system browser.
@@ -400,7 +448,7 @@ func (s *authMiddlewareState) handleAuthCodeAuth(
 
 		// Exchange the authorization code.
 		if exchangeErr := acf.ExchangeCode(ctx, redirectURL, s.scopes); exchangeErr != nil {
-			return mcp.NewToolResultError(FormatAuthError(exchangeErr)), nil
+			return mcp.NewToolResultError(FormatAuthErrorFor(exchangeErr, "auth_code")), nil
 		}
 
 		// Persist the account metadata.
@@ -430,221 +478,6 @@ func (s *authMiddlewareState) handleAuthCodeAuth(
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"Unexpected elicitation response: %s", result.Action)), nil
 	}
-}
-
-// handleBrowserAuth performs re-authentication using the interactive browser
-// flow. It first attempts to notify the user via URL mode elicitation
-// (RequestURLElicitation), falling back to LoggingMessageNotification when the
-// client does not support elicitation.
-//
-// The browser credential's Authenticate method opens the system browser
-// directly. The authentication runs in a background goroutine to allow a
-// generous timeout for user interaction. The middleware waits for completion
-// and either retries the original tool call on success or returns
-// troubleshooting guidance on failure.
-//
-// Parameters:
-//   - ctx: the tool handler context containing the MCPServer.
-//   - next: the inner tool handler to retry after successful re-authentication.
-//   - request: the original tool call request for retry.
-//   - origErr: the original Go error from the failed handler call.
-//   - cred: the Authenticator to use for re-authentication (per-account or closure).
-//   - authRecordPath: the filesystem path for persisting the AuthenticationRecord.
-//
-// Returns the retried handler result on success, or an error result with
-// troubleshooting guidance on failure or timeout.
-func (s *authMiddlewareState) handleBrowserAuth(
-	ctx context.Context,
-	next mcpserver.ToolHandlerFunc,
-	request mcp.CallToolRequest,
-	origErr error,
-	cred Authenticator,
-	authRecordPath string,
-) (*mcp.CallToolResult, error) {
-	// Try URL mode elicitation to present the login URL to the user.
-	// Fall back to LoggingMessageNotification if elicitation is not supported.
-	elicitationID := uuid.New().String()
-	loginURL := "https://login.microsoftonline.com"
-	message := "Authentication required. A browser window will open for Microsoft login."
-
-	_, elicitErr := s.urlElicit(ctx, elicitationID, loginURL, message)
-	if elicitErr != nil {
-		if errors.Is(elicitErr, mcpserver.ErrElicitationNotSupported) {
-			slog.Info("URL elicitation not supported, falling back to notification")
-			sendClientNotification(ctx, mcp.LoggingLevelWarning, message)
-		} else {
-			slog.Warn("URL elicitation failed, falling back to notification", "error", elicitErr)
-			sendClientNotification(ctx, mcp.LoggingLevelWarning, message)
-		}
-	}
-
-	// Use a background context since the tool call context may have a short
-	// deadline. Browser auth requires user interaction.
-	authCtx := context.Background()
-	authCtx = injectMCPServer(ctx, authCtx)
-
-	// Start the browser auth flow in the background.
-	done := make(chan struct{})
-	s.pendingDone = done
-	s.pendingAuth.Store(true)
-
-	go func() {
-		defer close(done)
-		_, err := s.authenticate(authCtx, cred, authRecordPath, s.scopes)
-		s.pendingErr = err
-		if err != nil {
-			slog.Error("background re-authentication failed", "error", err)
-		} else if s.authenticated.CompareAndSwap(false, true) {
-			slog.Info("server authenticated and ready to serve")
-		}
-	}()
-
-	// Wait for auth completion or timeout.
-	select {
-	case <-done:
-		s.pendingAuth.Store(false)
-		if s.pendingErr != nil {
-			errToFormat := s.pendingErr
-			if origErr != nil {
-				errToFormat = origErr
-			}
-			return mcp.NewToolResultError(FormatAuthError(errToFormat)), nil
-		}
-		// Retry the original tool call.
-		return next(ctx, request)
-
-	case <-time.After(s.browserTimeout):
-		// Timeout waiting for the user to complete browser login.
-		return mcp.NewToolResultError(FormatAuthError(
-			fmt.Errorf("authentication required: browser login was not completed in time"))), nil
-	}
-}
-
-// handleDeviceCodeAuth performs re-authentication using the device code flow.
-// It starts the flow in a background goroutine and waits for the device code
-// prompt from Entra ID via the deviceCodeCh channel. Once received, it
-// attempts to present the device code and URL via form mode elicitation
-// (RequestElicitation), falling back to returning the prompt as a tool result
-// when elicitation is not supported.
-//
-// Parameters:
-//   - ctx: the tool handler context containing the MCPServer.
-//   - next: the inner tool handler to retry after successful re-authentication.
-//   - request: the original tool call request for retry.
-//   - origErr: the original Go error from the failed handler call.
-//   - cred: the Authenticator to use for re-authentication (per-account or closure).
-//   - authRecordPath: the filesystem path for persisting the AuthenticationRecord.
-//
-// Returns the device code prompt as a text result, the retried handler result
-// on silent auth success, or an error result with troubleshooting guidance.
-func (s *authMiddlewareState) handleDeviceCodeAuth(
-	ctx context.Context,
-	next mcpserver.ToolHandlerFunc,
-	request mcp.CallToolRequest,
-	origErr error,
-	cred Authenticator,
-	authRecordPath string,
-) (*mcp.CallToolResult, error) {
-	// Send notification to MCP client that authentication is required.
-	sendClientNotification(ctx, mcp.LoggingLevelWarning,
-		"Authentication required. Initiating device code login flow...")
-
-	// Use a background context for the device code flow, since the tool call
-	// context may have a short deadline. The device code flow can take up to
-	// ~15 minutes while the user completes login.
-	authCtx := context.Background()
-
-	// Inject the tool handler's MCPServer context for UserPrompt notifications.
-	authCtx = injectMCPServer(ctx, authCtx)
-
-	// Inject channel so deviceCodeUserPrompt can forward the device code
-	// message back for inclusion in the tool result.
-	deviceCodeCh := make(chan string, 1)
-	authCtx = context.WithValue(authCtx, DeviceCodeMsgKey, deviceCodeCh)
-
-	// Start the device code flow in the background so the tool call can
-	// return the device code prompt to the agent/user immediately.
-	done := make(chan struct{})
-	s.pendingDone = done
-	s.pendingAuth.Store(true)
-
-	go func() {
-		defer close(done)
-		_, err := s.authenticate(authCtx, cred, authRecordPath, s.scopes)
-		s.pendingErr = err
-		if err != nil {
-			slog.Error("background re-authentication failed", "error", err)
-		} else if s.authenticated.CompareAndSwap(false, true) {
-			slog.Info("server authenticated and ready to serve")
-		}
-	}()
-
-	// Wait for the device code message or early auth completion.
-	select {
-	case msg := <-deviceCodeCh:
-		// Try form mode elicitation to display the device code and URL.
-		slog.Info("device code prompt captured, presenting to client")
-		return s.presentDeviceCode(ctx, msg), nil
-
-	case <-done:
-		// Auth completed before the device code prompt was needed
-		// (e.g. a cached refresh token was still valid).
-		s.pendingAuth.Store(false)
-		if s.pendingErr != nil {
-			errToFormat := s.pendingErr
-			if origErr != nil {
-				errToFormat = origErr
-			}
-			return mcp.NewToolResultError(FormatAuthError(errToFormat)), nil
-		}
-		// Retry the original tool call.
-		return next(ctx, request)
-
-	case <-time.After(15 * time.Second):
-		// Timeout waiting for the device code prompt from Entra ID.
-		return mcp.NewToolResultError(FormatAuthError(
-			fmt.Errorf("authentication required: device code prompt was not received from Entra ID"))), nil
-	}
-}
-
-// presentDeviceCode attempts to present the device code prompt to the user
-// via form mode elicitation. If elicitation is not supported, the prompt is
-// returned as a plain text tool result (the existing behavior).
-//
-// Parameters:
-//   - ctx: the context for the elicitation call.
-//   - msg: the device code message containing the URL and user code.
-//
-// Returns the tool result to send back to the client.
-func (s *authMiddlewareState) presentDeviceCode(ctx context.Context, msg string) *mcp.CallToolResult {
-	elicitationRequest := mcp.ElicitationRequest{
-		Params: mcp.ElicitationParams{
-			Message: msg,
-			RequestedSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"acknowledged": map[string]any{
-						"type":        "boolean",
-						"description": "Check this after completing the device code login in your browser.",
-					},
-				},
-			},
-		},
-	}
-
-	_, err := s.elicit(ctx, elicitationRequest)
-	if err != nil {
-		if errors.Is(err, mcpserver.ErrElicitationNotSupported) {
-			slog.Info("form elicitation not supported, returning device code as text")
-		} else {
-			slog.Warn("device code elicitation failed, returning as text", "error", err)
-		}
-		// Fall back to returning the device code prompt as plain text.
-		return mcp.NewToolResultText(msg)
-	}
-
-	// Elicitation succeeded — the user acknowledged the device code.
-	return mcp.NewToolResultText(msg)
 }
 
 // pendingAuthMessage returns the appropriate "authentication in progress"

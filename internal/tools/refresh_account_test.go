@@ -182,3 +182,56 @@ func TestRefreshAccount_GetTokenError(t *testing.T) {
 		t.Fatal("expected error result when GetToken fails")
 	}
 }
+
+// TestRefreshAccount_DeclinesDuringInteractiveAuth verifies that account_refresh
+// returns an actionable message instead of blocking when an interactive sign-in
+// is already running (CR-0067 A4).
+//
+// Without this guard the handler calls GetToken on the same credential the
+// sign-in is holding, and azidentity's per-client mutex is not context-aware,
+// so the call hangs for the whole sign-in. account_refresh is one of the verbs
+// the middleware's own recovery guidance names, so hanging it makes that
+// guidance dead.
+func TestRefreshAccount_DeclinesDuringInteractiveAuth(t *testing.T) {
+	cred := &refreshMockCredential{expiry: time.Now().Add(time.Hour)}
+	registry := auth.NewAccountRegistry()
+	if err := registry.Add(&auth.AccountEntry{
+		Label:         "work",
+		Authenticated: true,
+		Credential:    cred,
+	}); err != nil {
+		t.Fatalf("registry.Add() error: %v", err)
+	}
+
+	auth.BeginInteractiveAuth()
+	defer auth.EndInteractiveAuth()
+
+	handler := HandleRefreshAccount(registry, addAccountTestConfig(t))
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]any{"label": "work"}
+
+	done := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		result, err := handler(context.Background(), request)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		done <- result
+	}()
+
+	select {
+	case result := <-done:
+		if !result.IsError {
+			t.Fatal("expected an error result while a sign-in is in progress")
+		}
+		text := extractText(t, result)
+		if !strings.Contains(text, "sign-in is already in progress") {
+			t.Errorf("result = %q, want it to explain that a sign-in is outstanding", text)
+		}
+		if cred.calls != 0 {
+			t.Error("GetToken must not be called; it would block on the credential lock")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("account_refresh blocked while an interactive sign-in was in flight")
+	}
+}

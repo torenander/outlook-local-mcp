@@ -76,7 +76,7 @@ func buildCallToolRequest(args map[string]any) mcp.CallToolRequest {
 // message in the tool result.
 func TestCompleteAuth_ValidURL(t *testing.T) {
 	mock := &mockAuthCodeCred{}
-	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"})
+	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"}, "auth_code")
 
 	redirectURL := "https://login.microsoftonline.com/common/oauth2/nativeclient?code=abc123&state=xyz"
 	req := buildCallToolRequest(map[string]any{"redirect_url": redirectURL})
@@ -105,7 +105,7 @@ func TestCompleteAuth_InvalidURL(t *testing.T) {
 	mock := &mockAuthCodeCred{
 		exchangeErr: fmt.Errorf("invalid redirect URL: must start with https://login.microsoftonline.com/common/oauth2/nativeclient"),
 	}
-	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"})
+	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"}, "auth_code")
 
 	req := buildCallToolRequest(map[string]any{"redirect_url": "https://evil.com/callback?code=abc"})
 
@@ -127,7 +127,7 @@ func TestCompleteAuth_InvalidURL(t *testing.T) {
 // redirect_url parameter returns an error.
 func TestCompleteAuth_MissingParam(t *testing.T) {
 	mock := &mockAuthCodeCred{}
-	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"})
+	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"}, "auth_code")
 
 	// No redirect_url in arguments.
 	req := buildCallToolRequest(map[string]any{})
@@ -150,7 +150,7 @@ func TestCompleteAuth_MissingParam(t *testing.T) {
 // an error.
 func TestCompleteAuth_EmptyParam(t *testing.T) {
 	mock := &mockAuthCodeCred{}
-	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"})
+	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"}, "auth_code")
 
 	req := buildCallToolRequest(map[string]any{"redirect_url": ""})
 
@@ -174,7 +174,7 @@ func TestCompleteAuth_ExchangeFails(t *testing.T) {
 	mock := &mockAuthCodeCred{
 		exchangeErr: fmt.Errorf("exchange authorization code: token expired"),
 	}
-	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"})
+	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"}, "auth_code")
 
 	redirectURL := "https://login.microsoftonline.com/common/oauth2/nativeclient?code=expired123"
 	req := buildCallToolRequest(map[string]any{"redirect_url": redirectURL})
@@ -197,25 +197,43 @@ func TestCompleteAuth_ExchangeFails(t *testing.T) {
 }
 
 // TestCompleteAuth_NonAuthCodeCredential verifies that if the credential does
-// not implement AuthCodeFlow, the tool returns a descriptive internal error.
+// not implement AuthCodeFlow, the tool explains which recovery path applies
+// instead of reporting an internal type error (CR-0067 A3).
 func TestCompleteAuth_NonAuthCodeCredential(t *testing.T) {
-	mock := &mockNonAuthCodeCred{}
-	handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"})
-
-	redirectURL := "https://login.microsoftonline.com/common/oauth2/nativeclient?code=abc"
-	req := buildCallToolRequest(map[string]any{"redirect_url": redirectURL})
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected error result for non-AuthCodeFlow credential")
+	tests := []struct {
+		name       string
+		authMethod string
+		wantSubstr string
+	}{
+		{"browser", "browser", "browser that opens"},
+		{"device code", "device_code", "device login page"},
+		{"unknown", "", "operation=\"status\""},
 	}
 
-	text := extractText(t, result)
-	if !strings.Contains(text, "does not support the auth_code flow") {
-		t.Errorf("error text %q should indicate auth_code not supported", text)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockNonAuthCodeCred{}
+			handler := HandleCompleteAuth(mock, "/tmp/test-auth-record.json", nil, []string{"Calendars.ReadWrite"}, tt.authMethod)
+
+			redirectURL := "https://login.microsoftonline.com/common/oauth2/nativeclient?code=abc"
+			req := buildCallToolRequest(map[string]any{"redirect_url": redirectURL})
+
+			result, err := handler(context.Background(), req)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.IsError {
+				t.Fatal("expected error result for non-AuthCodeFlow credential")
+			}
+
+			text := extractText(t, result)
+			if !strings.Contains(text, tt.wantSubstr) {
+				t.Errorf("error text %q should contain %q", text, tt.wantSubstr)
+			}
+			if !strings.Contains(text, "operation=\"login\"") {
+				t.Errorf("error text %q should point at the account login verb", text)
+			}
+		})
 	}
 }
 
@@ -279,7 +297,7 @@ func TestCompleteAuth_WithAccountParam(t *testing.T) {
 		t.Fatalf("registry.Add() error: %v", err)
 	}
 
-	handler := HandleCompleteAuth(defaultMock, "/tmp/default-auth-record.json", registry, []string{"Calendars.ReadWrite"})
+	handler := HandleCompleteAuth(defaultMock, "/tmp/default-auth-record.json", registry, []string{"Calendars.ReadWrite"}, "auth_code")
 
 	redirectURL := "https://login.microsoftonline.com/common/oauth2/nativeclient?code=acct123"
 	req := buildCallToolRequest(map[string]any{
@@ -310,7 +328,7 @@ func TestCompleteAuth_UnknownAccount(t *testing.T) {
 	defaultMock := &mockAuthCodeCred{}
 	registry := auth.NewAccountRegistry()
 
-	handler := HandleCompleteAuth(defaultMock, "/tmp/default-auth-record.json", registry, []string{"Calendars.ReadWrite"})
+	handler := HandleCompleteAuth(defaultMock, "/tmp/default-auth-record.json", registry, []string{"Calendars.ReadWrite"}, "auth_code")
 
 	redirectURL := "https://login.microsoftonline.com/common/oauth2/nativeclient?code=abc"
 	req := buildCallToolRequest(map[string]any{

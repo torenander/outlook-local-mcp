@@ -592,8 +592,10 @@ func (s *addAccountState) authenticateDeviceCode(
 
 	authCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 
-	// Inject channel for capturing the device code message.
-	deviceCodeCh := make(chan string, 1)
+	// Inject channel for capturing the device code challenge. The element type
+	// must match the type deviceCodeUserPrompt sends (CR-0067 A7); a mismatch
+	// would silently drop every prompt.
+	deviceCodeCh := make(chan auth.DeviceCodePrompt, 1)
 	authCtx = context.WithValue(authCtx, auth.DeviceCodeMsgKey, deviceCodeCh)
 
 	// Create pending account struct upfront so goroutine can write to p.err.
@@ -617,9 +619,9 @@ func (s *addAccountState) authenticateDeviceCode(
 
 	// Wait for the device code prompt, then present it via elicitation.
 	select {
-	case msg := <-deviceCodeCh:
+	case prompt := <-deviceCodeCh:
 		logger.Info("device code prompt captured, presenting to client")
-		if elicitErr := s.presentDeviceCodeElicitation(ctx, msg, label, logger); elicitErr != nil {
+		if elicitErr := s.presentDeviceCodeElicitation(ctx, prompt.Message, label, logger); elicitErr != nil {
 			// Elicitation failed. Keep goroutine alive and store pending state
 			// so the next add_account call can pick up the completed auth.
 			s.storePending(label, p)

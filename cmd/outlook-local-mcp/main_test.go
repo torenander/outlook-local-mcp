@@ -101,7 +101,7 @@ func TestStartupTokenProbe_CompletesWithin5Seconds(t *testing.T) {
 		preAuthCalled := false
 
 		start := time.Now()
-		probeStartupToken(cred, "browser", "", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
+		probeStartupToken(cred, "browser", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
 		elapsed := time.Since(start)
 
 		if elapsed > 5*time.Second {
@@ -122,7 +122,7 @@ func TestStartupTokenProbe_CompletesWithin5Seconds(t *testing.T) {
 		preAuthCalled := false
 
 		start := time.Now()
-		probeStartupToken(cred, "auth_code", "", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
+		probeStartupToken(cred, "auth_code", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
 		elapsed := time.Since(start)
 
 		if elapsed > 5*time.Second {
@@ -136,48 +136,43 @@ func TestStartupTokenProbe_CompletesWithin5Seconds(t *testing.T) {
 		}
 	})
 
-	t.Run("device_code_skipped_no_auth_record", func(t *testing.T) {
+	// CR-0067 A1: device_code credentials are now constructed with
+	// DisableAutomaticAuthentication, so GetToken cannot emit a device code.
+	// The probe therefore runs for device_code like any other method, and
+	// preAuthenticated reflects a real token check rather than an os.Stat of
+	// the auth record.
+	t.Run("device_code_probes_credential_on_success", func(t *testing.T) {
 		cred := &mockTokenCredential{}
 		preAuthCalled := false
 
 		start := time.Now()
-		probeStartupToken(cred, "device_code", "/nonexistent/path", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
+		probeStartupToken(cred, "device_code", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
 		elapsed := time.Since(start)
 
 		if elapsed > 5*time.Second {
 			t.Errorf("probe took %v, want < 5s (AC-8)", elapsed)
 		}
-		if cred.called {
-			t.Error("GetToken should NOT be called for device_code (would trigger interactive auth)")
+		if !cred.called {
+			t.Error("GetToken should be called for device_code now that it is silent-only")
 		}
-		if preAuthCalled {
-			t.Error("markPreAuthenticated should not be called when no auth record exists")
+		if !preAuthCalled {
+			t.Error("markPreAuthenticated should be called on successful probe")
 		}
 	})
 
-	t.Run("device_code_with_auth_record_marks_pre_authenticated", func(t *testing.T) {
-		// Create a temporary auth record file to simulate a previous session.
-		tmpDir := t.TempDir()
-		authRecord := filepath.Join(tmpDir, "auth_record.json")
-		if err := os.WriteFile(authRecord, []byte(`{}`), 0600); err != nil {
-			t.Fatal(err)
+	t.Run("device_code_cache_miss_does_not_mark_pre_authenticated", func(t *testing.T) {
+		cred := &mockTokenCredential{
+			getTokenErr: fmt.Errorf("DeviceCodeCredential can't acquire a token without user interaction"),
 		}
-
-		cred := &mockTokenCredential{}
 		preAuthCalled := false
 
-		start := time.Now()
-		probeStartupToken(cred, "device_code", authRecord, func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
-		elapsed := time.Since(start)
+		probeStartupToken(cred, "device_code", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
 
-		if elapsed > 5*time.Second {
-			t.Errorf("probe took %v, want < 5s (AC-8)", elapsed)
+		if !cred.called {
+			t.Error("GetToken should be called for device_code")
 		}
-		if cred.called {
-			t.Error("GetToken should NOT be called for device_code")
-		}
-		if !preAuthCalled {
-			t.Error("markPreAuthenticated should be called when auth record exists (cached tokens likely valid)")
+		if preAuthCalled {
+			t.Error("markPreAuthenticated should not be called when the cache misses")
 		}
 	})
 
@@ -188,7 +183,7 @@ func TestStartupTokenProbe_CompletesWithin5Seconds(t *testing.T) {
 		preAuthCalled := false
 
 		start := time.Now()
-		probeStartupToken(cred, "browser", "", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
+		probeStartupToken(cred, "browser", func() { preAuthCalled = true }, []string{"Calendars.ReadWrite"})
 		elapsed := time.Since(start)
 
 		if elapsed > 6*time.Second {

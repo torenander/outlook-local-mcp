@@ -53,14 +53,22 @@ func NewCompleteAuthTool() mcp.Tool {
 // provided, the handler looks up the account in the registry and uses its
 // credential; otherwise it falls back to the default credential.
 //
+// Since CR-0067 the verb is registered unconditionally, so the handler must
+// cope with being called against a credential that does not run the
+// authorization code flow. In that case it returns the method-specific
+// guidance from completeAuthUnavailable rather than an internal type error.
+//
 // Parameters:
-//   - cred: the default account's Authenticator that must also implement
-//     auth.AuthCodeFlow.
+//   - cred: the default account's Authenticator. Implements auth.AuthCodeFlow
+//     only when the default account uses the auth_code method.
 //   - authRecordPath: the filesystem path for persisting account metadata
 //     after successful token exchange (used for the default account).
 //   - registry: the account registry for looking up named accounts. May be
 //     nil when multi-account is not active.
 //   - scopes: OAuth scopes to request during token exchange (from auth.Scopes(cfg)).
+//   - defaultAuthMethod: the server's configured authentication method, used
+//     to explain the correct recovery path when the default account is not
+//     running the auth_code flow.
 //
 // Returns a tool handler function compatible with the MCP server's AddTool
 // method. The handler returns a JSON success message via mcp.NewToolResultText,
@@ -69,7 +77,7 @@ func NewCompleteAuthTool() mcp.Tool {
 //
 // Side effects: exchanges the authorization code for tokens via MSAL,
 // persists account metadata to disk on success.
-func HandleCompleteAuth(cred auth.Authenticator, authRecordPath string, registry *auth.AccountRegistry, scopes []string) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func HandleCompleteAuth(cred auth.Authenticator, authRecordPath string, registry *auth.AccountRegistry, scopes []string, defaultAuthMethod string) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		logger := logging.Logger(ctx)
 
@@ -84,9 +92,12 @@ func HandleCompleteAuth(cred auth.Authenticator, authRecordPath string, registry
 
 		logger.Debug("tool called")
 
-		// Resolve the target credential and auth record path.
+		// Resolve the target credential, auth record path, and the method that
+		// account actually uses.
 		targetCred, targetPath := cred, authRecordPath
-		if accountLabel := request.GetString("account", ""); accountLabel != "" {
+		targetMethod := defaultAuthMethod
+		accountLabel := request.GetString("account", "")
+		if accountLabel != "" {
 			if registry == nil {
 				return mcp.NewToolResultError(fmt.Sprintf("account %q specified but no account registry available", accountLabel)), nil
 			}
@@ -96,15 +107,20 @@ func HandleCompleteAuth(cred auth.Authenticator, authRecordPath string, registry
 			}
 			targetCred = entry.Authenticator
 			targetPath = entry.AuthRecordPath
+			if entry.AuthMethod != "" {
+				targetMethod = entry.AuthMethod
+			}
 			logger = logger.With("account", accountLabel)
 		}
 
-		// Type-assert to AuthCodeFlow interface.
+		// Type-assert to AuthCodeFlow interface. A miss is not an internal
+		// error: the verb is always registered, so a caller on browser or
+		// device_code legitimately lands here and needs to be told which verb
+		// to call instead (CR-0067 A3).
 		acf, ok := targetCred.(auth.AuthCodeFlow)
 		if !ok {
-			return mcp.NewToolResultError(
-				"Internal error: credential does not support the auth_code flow. " +
-					"Check that OUTLOOK_MCP_AUTH_METHOD is set to 'auth_code'."), nil
+			logger.Info("complete_auth called for a non-auth_code credential", "auth_method", targetMethod)
+			return mcp.NewToolResultError(completeAuthUnavailable(targetMethod, accountLabel)), nil
 		}
 
 		// Exchange the authorization code for tokens.

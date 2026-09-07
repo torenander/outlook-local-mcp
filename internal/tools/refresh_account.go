@@ -100,6 +100,20 @@ func HandleRefreshAccount(registry *auth.AccountRegistry, cfg config.Config) fun
 			return mcp.NewToolResultError(fmt.Sprintf("Account %q has no credential attached; use account_login to re-authenticate.", label)), nil
 		}
 
+		// Refuse rather than block while an interactive sign-in is running.
+		// GetToken would contend with it on the credential's internal mutex,
+		// which ignores ctx deadlines, so this call would hang for the whole
+		// sign-in instead of returning (CR-0067 A4; see auth/inflight.go).
+		// A refresh is pointless anyway while the flow that is about to mint a
+		// fresh token is still in progress.
+		if auth.InteractiveAuthInFlight() {
+			logger.Info("refresh declined, interactive authentication in progress", "label", label)
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"Cannot refresh account %q right now: an interactive sign-in is already in progress. "+
+					"Complete that sign-in, then retry your original request — a successful sign-in "+
+					"already yields a fresh token, so no refresh is needed afterwards.", label)), nil
+		}
+
 		tok, err := entry.Credential.GetToken(ctx, policy.TokenRequestOptions{
 			Scopes:    scopes,
 			EnableCAE: true,
@@ -123,7 +137,7 @@ func HandleRefreshAccount(registry *auth.AccountRegistry, cfg config.Config) fun
 		}
 		b.WriteString(header)
 		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("New expiry: %s", expiry))
+		fmt.Fprintf(&b, "New expiry: %s", expiry)
 		if line := AccountInfoLine(ctx); line != "" {
 			b.WriteString("\n")
 			b.WriteString(line)

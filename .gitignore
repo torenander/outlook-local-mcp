@@ -52,3 +52,6 @@ docs/bench/runs/
 /bin/
 /.worktrees/
 docs/research/cr-0060-token-economics/runs/
+
+# Serena MCP local project state (config + memories)
+/.serena/
